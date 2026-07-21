@@ -1,0 +1,9 @@
+bin/
+obj/
+Tests/bin/
+Tests/obj/
+Logs/
+*.user
+.vs/
+CLAUDE.md
+.claude/settings.json
