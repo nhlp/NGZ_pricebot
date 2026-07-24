@@ -36,6 +36,20 @@
 // bulamazsa pipeline yine normal şekilde fuzzy son çareye / atlanmaya düşer —
 // yani kodun tamamen başka bir yerde olduğu etiketlere hiçbir zarar vermez,
 // sadece ek bir şans.
+//
+// v6 eklentisi: adaptif eşikleme + dilation, kalın yuvarlak (bubble) fontlarda ters
+// etki yapıyor — Bebly "20020" etiketiyle kanıtlandı: aynı kırpılmış bölge düz gri
+// tonlamayla verilince Tesseract kodu kusursuz okurken, adaptif eşiklemeden geçince
+// tanınmaz hâle geliyor (rakamların iç boşlukları/konturları bozuluyor). Bu yüzden
+// beşinci bir kurtarma denemesi eklendi: üst/alt %20'lik bandın YATAYDA ÖRTÜŞEN
+// üçte-birlik dilimleri, eşikleme uygulanmadan (sadece kırpma + 4x + gri tonlama)
+// tek tek denenir. Dilimlerin dar olması şart: tam genişlik şerit gri tonlamayla da
+// çalışmıyor, yanlardaki fotoğraf içeriği Tesseract'ın segmentasyonunu bozuyor
+// (Bebly 20020 ile ölçüldü). Ayrıca fuzzy son çareye asgari güven eşiği eklendi:
+// gri dilimlerin kumaş/dantel dokusundan ürettiği çöp adaylar (güven ~5) tesadüfen
+// bir Excel koduna 1 mesafede olabiliyor ve tek aday olarak fuzzy'den geçebiliyordu
+// (gerçek vaka: "51005" -> 5005). Sıralama bilinçli: önce mevcut adaptif geçişler
+// (kesik-çizgili/düşük kontrastlı fontlar), bulamazlarsa gri dilimler (bubble fontlar).
 namespace PriceBotPipeline;
 
 using System.Text.RegularExpressions;
@@ -114,6 +128,31 @@ public sealed class FullScanOcr : IDisposable
 
                 extracted = ExtractCandidates(tokens);
                 matches = MatchExact(extracted, excelCodes);
+            }
+
+            if (matches.Count == 0)
+            {
+                // Beşinci deneme (v6): DAR gri tonlamalı dilimler — adaptif eşikleme OLMADAN,
+                // sadece kırpma + 4x büyütme + gri. Kalın yuvarlak (bubble) fontları adaptif
+                // eşikleme bozuyor; eşiklemesiz hâlde sorunsuz okunuyorlar. Tam genişlik şerit
+                // de İŞE YARAMIYOR (yanlardaki fotoğraf içeriği Tesseract'ın segmentasyonunu
+                // bozuyor — Bebly 20020 ile denendi), bu yüzden üst ve alt %20'lik bant,
+                // yatayda birbiriyle örtüşen üçte-birlik dilimlere bölünür ve dilimler tek tek
+                // denenir. Önce üst-orta (Bebly tipi kolajlarda kodun olduğu yer), eşleşme
+                // bulunan ilk dilimde durulur.
+                foreach (var (fromTop, xFrom, xTo) in new[]
+                {
+                    (true,  0.25, 0.75), (true,  0.0, 0.5), (true,  0.5, 1.0),
+                    (false, 0.25, 0.75), (false, 0.0, 0.5), (false, 0.5, 1.0),
+                })
+                {
+                    prepared.Add(PreprocessTileGray(imagePath, fromTop, xFrom, xTo));
+                    MergeTokens(tokens, CollectTokens(prepared[^1]));
+
+                    extracted = ExtractCandidates(tokens);
+                    matches = MatchExact(extracted, excelCodes);
+                    if (matches.Count > 0) break;
+                }
             }
 
             var candidates = extracted.Keys.ToList();
@@ -198,7 +237,13 @@ public sealed class FullScanOcr : IDisposable
 
     /// <summary>Excel'deki her kodu OCR adaylarıyla Levenshtein mesafesi &lt;=1 için karşılaştırır.
     /// Yalnızca tek ve belirsiz olmayan bir eşleşme bulunursa döner (aksi halde null —
-    /// yanlış ürüne fiyat atama riskini almamak için).</summary>
+    /// yanlış ürüne fiyat atama riskini almamak için). Güveni düşük adaylar hiç değerlendirilmez:
+    /// kumaş/dantel dokusundan çıkan çöp token'lar (güven ~5) tesadüfen bir Excel koduna 1 mesafede
+    /// olabiliyor (gerçek vaka: dantelden okunan "51005" -> 5005 yanlış eşleşmesi) ve fuzzy tek
+    /// aday görüp kabul ediyordu. Gerçek tek-karakter OCR hataları ("134S" gibi) makul güvenle
+    /// gelir; bu eşik onları etkilemez.</summary>
+    private const float FuzzyMinConfidence = 40f;
+
     private static CodeMatch? TryFuzzyMatch(List<string> candidates, Dictionary<string, float> extracted, IReadOnlySet<string> excelCodes)
     {
         var found = new Dictionary<string, (float Conf, string Candidate)>();
@@ -207,6 +252,7 @@ public sealed class FullScanOcr : IDisposable
         {
             foreach (var candidate in candidates)
             {
+                if (extracted[candidate] < FuzzyMinConfidence) continue;
                 if (Math.Abs(candidate.Length - code.Length) > 1) continue;
                 if (LevenshteinDistance(candidate, code) != 1) continue;
 
@@ -335,6 +381,47 @@ public sealed class FullScanOcr : IDisposable
         using var scaled = crop.Resize(info, SKFilterQuality.High);
         using var processed = AdaptiveThreshold(scaled);
         return SavePng(processed);
+    }
+
+    /// <summary>Üst veya alt %20'lik bandın, yatayda [xFrom, xTo] aralığındaki dilimini kırpıp
+    /// 4x büyütür ve SADECE gri tonlama uygular — eşikleme/kontrast germe yok (kalın yuvarlak
+    /// fontları her tür eşikleme bozuyor, bkz. dosya başındaki v6 notu; binarizasyon Tesseract'ın
+    /// kendi iç mekanizmasına bırakılır). Dilim dar tutulur ki çevredeki fotoğraf içeriği
+    /// Tesseract'ın segmentasyonunu bozmasın.</summary>
+    private static string PreprocessTileGray(string imagePath, bool fromTop, double xFrom, double xTo)
+    {
+        using var src = SKBitmap.Decode(imagePath)
+            ?? throw new InvalidDataException($"Görsel açılamadı: {imagePath}");
+
+        int bandHeight = Math.Max(1, (int)(src.Height * 0.20));
+        int top = fromTop ? 0 : src.Height - bandHeight;
+        int x1 = (int)(src.Width * xFrom);
+        int x2 = Math.Max(x1 + 1, (int)(src.Width * xTo));
+
+        using var crop = new SKBitmap(x2 - x1, bandHeight);
+        using (var canvas = new SKCanvas(crop))
+            canvas.DrawBitmap(src, new SKRect(x1, top, x2, top + bandHeight), new SKRect(0, 0, crop.Width, crop.Height));
+
+        var info = new SKImageInfo(crop.Width * 4, crop.Height * 4);
+        using var scaled = crop.Resize(info, SKFilterQuality.High);
+        using var processed = ToGrayscale(scaled);
+        return SavePng(processed);
+    }
+
+    /// <summary>Sadece gri tonlama — eşikleme/kontrast germe yok. Kalın yuvarlak (bubble)
+    /// fontlarda her tür eşikleme rakam konturlarını bozduğu için görüntü "dokunulmamış"
+    /// bırakılır, binarizasyon Tesseract'ın kendi iç mekanizmasına kalır.</summary>
+    private static SKBitmap ToGrayscale(SKBitmap scaled)
+    {
+        var outBitmap = new SKBitmap(new SKImageInfo(scaled.Width, scaled.Height));
+        for (int y = 0; y < scaled.Height; y++)
+        for (int x = 0; x < scaled.Width; x++)
+        {
+            var c = scaled.GetPixel(x, y);
+            var g = (byte)(0.299 * c.Red + 0.587 * c.Green + 0.114 * c.Blue);
+            outBitmap.SetPixel(x, y, new SKColor(g, g, g));
+        }
+        return outBitmap;
     }
 
     /// <summary>Zaten ölçeklenmiş bir bitmap üzerinde yerel (pencere bazlı) adaptif eşikleme +

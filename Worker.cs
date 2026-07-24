@@ -10,8 +10,8 @@ namespace PriceBotPipeline;
 public class Worker : BackgroundService
 {
     private const string IncomingRoot = @"C:\PriceBot\Incoming";
-    private const string BotSendUrl = "http://localhost:3978/api/whatsapp/internal/send"; // Bot portu 3978'e eşitlendi!
-
+    //private const string BotSendUrl = "http://localhost:3978/api/whatsapp/internal/send"; // Bot portu 3978'e eşitlendi!
+    private const string BotSendUrl =  "https://asistyazilim.pakabulut.com:2304/api/whatsapp/internal/send";
     private static readonly HashSet<string> SupportedExtensions =
         new(StringComparer.OrdinalIgnoreCase) { ".jpg", ".jpeg", ".png", ".webp" };
 
@@ -178,8 +178,13 @@ public class Worker : BackgroundService
 
                         if (!chosen.TryGetValue(idx, out var best))
                         {
+                            // Adayların rapora yazılması teşhis için kritik: "OCR mi okuyamadı,
+                            // Excel'de mi yoktu" sorusu islendi.txt'ye bakarak tek seferde cevaplanır
+                            // (Bebly 20020 vakasında bu bilgi olmadığı için teşhis loglardan yapılamamıştı).
                             string reason = scan.Matches.Count == 0
-                                ? "Excel'deki kodlardan biriyle eşleşen bir ürün kodu bulunamadı"
+                                ? scan.Candidates.Count == 0
+                                    ? "Görselden hiçbir sayısal kod adayı okunamadı"
+                                    : $"Excel'deki kodlardan biriyle eşleşen bir ürün kodu bulunamadı — OCR'ın okuduğu adaylar: {string.Join(", ", scan.Candidates)}"
                                 : $"Bulunan kod(lar) ({string.Join(", ", scan.Matches.Select(m => m.Code))}) bu klasörde daha yüksek güvenle başka bir görsele atandı, yanlış fiyat riskine karşı atlandı";
                             _logger.LogWarning("'{File}' atlandı: {Reason}", fileName, reason);
                             imageResults.Add(new ImageResult(fileName, false, null, null, scan.Matches.Count, null, null, null, reason));

@@ -6,9 +6,12 @@ komutlar bu projenin gerçek yapılandırmasına göredir.
 
 ## 0. Genel bakış — sunucu topolojisi
 
-- Worker, WhatsApp bot'una `http://localhost:3978/...` üzerinden istek atıyor → **worker ile bot aynı
-  Windows sunucuda çalışmalı** (adres `localhost`, farklı makine olamaz; farklı makinede çalıştırmak
-  istersen `Worker.cs` içindeki `BotSendUrl` sabitini değiştirip yeniden derlemen gerekir).
+- Worker, WhatsApp bot'una `https://asistyazilim.pakabulut.com:2304/...` üzerinden istek atıyor
+  (`Worker.cs` içindeki `BotSendUrl` — eskiden `http://localhost:3978` idi, bot artık aynı sunucuda
+  public domain + HTTPS üzerinden 2304 portunda dinliyor) → **worker ile bot yine aynı Windows sunucuda
+  çalışmalı** (Incoming klasörü dosya sistemi üzerinden paylaşıldığı için), ama bot'a giden istek
+  `localhost` değil, sunucunun kendi public domain adresi üzerinden gidiyor. Bu, sunucunun kendi public
+  adresine "kendi kendine" (hairpin NAT) ulaşabilmesini gerektirir — adım 1.4'te bunu ayrıca test et.
 - Worker, bot'un dosya yazdığı `C:\PriceBot\Incoming\` klasörünü doğrudan dosya sistemi üzerinden okuyor
   → bu klasör de aynı sunucuda olmalı (worker ile bot aynı makinede olduğu için bu zaten sağlanır).
 - Worker, Nebim ERP'nin SQL Server'ına (`appsettings.json`'daki connection string,
@@ -36,8 +39,18 @@ Yani pratikte: **WhatsApp bot'unun zaten çalıştığı sunucuya** worker'ı ku
    Test-NetConnection -ComputerName asistyazilim.pakabulut.com -Port 9023
    ```
    `TcpTestSucceeded : True` olmalı. Değilse firewall/VPN kontrolü gerekir.
-4. WhatsApp bot'unun sunucuda kurulu ve `3978` portunda dinlediğinden emin ol (bot ayrı bir proje,
-   kurulumu bu rehberin kapsamında değil).
+4. WhatsApp bot'unun sunucuda kurulu ve `2304` portunda (HTTPS) dinlediğinden emin ol (bot ayrı bir
+   proje, kurulumu bu rehberin kapsamında değil). Ayrıca **sunucunun kendi üzerinden** kendi public
+   adresine ulaşabildiğini (hairpin NAT) doğrula — sunucuda:
+   ```
+   Test-NetConnection -ComputerName asistyazilim.pakabulut.com -Port 2304
+   ```
+   `TcpTestSucceeded : True` olmalı. Bazı NAT/firewall cihazları bir sunucunun kendi public adresine
+   dışarıdan gelen bir istekmiş gibi geri dönmesine (hairpin/loopback NAT) izin vermez — bu durumda bu
+   test başarısız olur ama dışarıdan (başka bir makineden) aynı adrese erişim çalışır; böyle bir sorunla
+   karşılaşırsan bot'un ayrıca `localhost:2304` veya sunucunun iç IP'sinde de dinleyip dinlemediğini
+   kontrol et ve gerekirse `Worker.cs`'teki `BotSendUrl`'ü ona göre (örn. `https://localhost:2304/...`)
+   değiştirip yeniden `dotnet publish` al.
 
 ## 2. Geliştirme makinesinde: publish alma
 
@@ -63,7 +76,7 @@ Ne yapıyor:
 | `appsettings.json`                     | Nebim bağlantı dizesi + `ExtraRecipients` — **kurulumdan önce mutlaka kontrol et (bkz. adım 3)** |
 | `tessdata\`                            | Tesseract OCR dil/eğitim dosyaları — **eksik olursa OCR çalışmaz**, tüm klasör kopyalanmalı |
 | `*.dll` (ClosedXML, SkiaSharp, Tesseract, Serilog, Microsoft.Data.SqlClient, Microsoft.Extensions.* vb.) | Bağımlılıklar, hepsi gerekli |
-| `runtimes\`                            | SkiaSharp/Tesseract gibi paketlerin native (işletim sistemine özel) DLL'leri — **bu klasör de mutlaka kopyalanmalı**, silinirse OCR/damgalama çalışmaz |
+| `x64\`, `x86\` klasörleri + kök dizindeki `libSkiaSharp.dll`, `de\`, `es\` vb. dil klasörleri | SkiaSharp/Tesseract'ın native DLL'leri ve uydu kaynak dosyaları (bu projede ayrı bir `runtimes\` alt klasörü **yok**, doğrudan kök dizine yayılıyorlar) — **hepsi mutlaka kopyalanmalı**, silinirse OCR/damgalama çalışmaz |
 | `Logs\`                                | İlk çalıştırmada otomatik oluşur, publish anında yok — kopyalamana gerek yok |
 
 **Kısacası: `C:\PriceBot\Publish\` klasörünün tamamını kopyala, tek tek dosya seçme.**
@@ -110,26 +123,29 @@ robocopy C:\PriceBot\Publish \\SUNUCU_ADI\C$\PriceBot\Publish /E
 Sunucuda **yönetici olarak** bir PowerShell/CMD aç:
 
 ```
-sc create PriceBotWorker binPath= "C:\PriceBot\Publish\PriceBot.Worker.exe" start= auto
+sc.exe create PriceBotWorker binPath= "C:\PriceBot\Publish\PriceBot.Worker.exe" start= auto
 ```
 
+- **PowerShell'de `sc` yazma, `sc.exe` yaz** — PowerShell'de `sc`, `Set-Content` cmdlet'inin yerleşik
+  takma adıdır (`sc.exe` değil) ve `binPath=` gibi argümanları anlamadığı için hataya düşer. CMD'de bu
+  sorun yoktur ama PowerShell'de her zaman `sc.exe` kullan.
 - `binPath=` ve `start=` sonrasındaki **boşluk zorunlu** (`sc.exe`'nin garip ama bilinen bir kuralı).
 - `start= auto` → sunucu her yeniden başladığında servis otomatik başlar.
 - Servis çalıştıran hesap belirtilmezse varsayılan olarak `LocalSystem` kullanılır — bu hesabın dosya
-  sistemine (Incoming/Publish/Logs klasörleri) ve ağa (Nebim DB, localhost:3978) erişimi olur, genelde
-  ek bir şey yapmana gerek yoktur. Kısıtlı bir hizmet hesabı kullanmak istersen `sc config PriceBotWorker
-  obj= "DOMAIN\hesap" password= "..."` ile ayrıca ayarlanır.
+  sistemine (Incoming/Publish/Logs klasörleri) ve ağa (Nebim DB, bot'un 2304 portu) erişimi olur, genelde
+  ek bir şey yapmana gerek yoktur. Kısıtlı bir hizmet hesabı kullanmak istersen `sc.exe config
+  PriceBotWorker obj= "DOMAIN\hesap" password= "..."` ile ayrıca ayarlanır.
 
 Servisi başlat:
 
 ```
-sc start PriceBotWorker
+sc.exe start PriceBotWorker
 ```
 
 Durumunu kontrol et:
 
 ```
-sc query PriceBotWorker
+sc.exe query PriceBotWorker
 ```
 
 `STATE` alanı `RUNNING` olmalı. `STOPPED` görünüyorsa adım 7'deki (sorun giderme) loglara bak.
@@ -153,9 +169,10 @@ sc query PriceBotWorker
   ve `tessdata\` eksik/yanlış yere kopyalanmış olabilir — adım 2'deki tabloyu kontrol et.
 - **Nebim kuru hiç bulunamıyor uyarısı sürekli tekrarlıyor**: adım 1.3'teki ağ testini tekrarla,
   connection string'i kontrol et.
-- **Görseller damgalanıyor ama WhatsApp'a gitmiyor**: bot'un gerçekten `3978`'de dinlediğini doğrula
-  (`Test-NetConnection -ComputerName localhost -Port 3978`), `islendi.txt` yazılmamışsa gönderim adımı
-  hata veriyor demektir — log dosyasında `Gönderim hatası` satırlarını ara.
+- **Görseller damgalanıyor ama WhatsApp'a gitmiyor**: bot'un gerçekten `2304`'te dinlediğini doğrula
+  (`Test-NetConnection -ComputerName asistyazilim.pakabulut.com -Port 2304`), `islendi.txt`
+  yazılmamışsa gönderim adımı hata veriyor demektir — log dosyasında `Gönderim hatası` satırlarını ara.
+  Hairpin NAT sorunuysa (bkz. adım 1.4) sunucu kendi public adresine ulaşamıyor olabilir.
 - **Loglar hiç yazılmıyor**: servis hesabının `C:\PriceBot\Publish\Logs\` klasörüne yazma izni olduğundan
   emin ol (varsayılan `LocalSystem` ile genelde sorun olmaz).
 
@@ -164,19 +181,19 @@ sc query PriceBotWorker
 Kod değiştiğinde:
 
 ```
-sc stop PriceBotWorker
+sc.exe stop PriceBotWorker
 dotnet publish PriceBot.Worker.csproj -c Release -r win-x64 --self-contained false -o C:\PriceBot\Publish_yeni
 ```
 Yeni çıktıyı sunucudaki `C:\PriceBot\Publish\` üzerine kopyala (appsettings.json'ı ezmemeye dikkat et —
-sunucudaki gerçek `ExtraRecipients`/connection string sürümünü koru, sadece `.exe/.dll` ve `tessdata\`/
-`runtimes\` güncellensin), sonra:
+sunucudaki gerçek `ExtraRecipients`/connection string sürümünü koru, sadece `.exe/.dll` ve native/dil
+klasörleri — `x64\`, `x86\`, `tessdata\` vb. — güncellensin), sonra:
 ```
-sc start PriceBotWorker
+sc.exe start PriceBotWorker
 ```
 
 ## 9. Kaldırma
 
 ```
-sc stop PriceBotWorker
-sc delete PriceBotWorker
+sc.exe stop PriceBotWorker
+sc.exe delete PriceBotWorker
 ```
