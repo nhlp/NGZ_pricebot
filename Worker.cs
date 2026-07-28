@@ -28,6 +28,7 @@ public class Worker : BackgroundService
         string? Code,
         double? Confidence,
         int CandidateCount,
+        decimal? PriceExcel,
         decimal? PriceTry,
         decimal? PriceUsd,
         string? OutputFileName,
@@ -52,11 +53,18 @@ public class Worker : BackgroundService
         var extraRecipients = config["ExtraRecipients"]?.AsArray().Select(n => n!.GetValue<string>()).ToList() ?? [];
 
         using var http = new HttpClient();
-        var rateProvider = new NebimRateProvider(nebimConnectionString);
-        using var ocr = new FullScanOcr(Path.Combine(appDir, "tessdata"), @"\d{4,7}");
+        var rateProvider = new NebimRateProvider(nebimConnectionString, _logger);
+        var brandProvider = new NebimBrandProvider(nebimConnectionString, _logger);
 
-        _logger.LogInformation("PriceBot Worker başladı. IncomingRoot={IncomingRoot} BotSendUrl={BotSendUrl} ExtraRecipients={ExtraRecipients}",
-            IncomingRoot, BotSendUrl, extraRecipients.Count == 0 ? "(boş)" : string.Join(", ", extraRecipients));
+        // TesseractEngine thread-safe değil; görseller, başlangıçta bir kez kurulan sabit
+        // boyutlu bir motor havuzuyla paralel taranır (motor kurulumu pahalı olduğu için
+        // görsel başına değil, servis ömrü boyunca aynı örnekler kullanılır). Bir çekirdek
+        // sistemin geri kalanına (bot, SQL) bırakılır; bellek için 6 örnekle sınırlanır.
+        var ocrParallelism = Math.Clamp(Environment.ProcessorCount - 1, 1, 6);
+        using var ocrPool = new FullScanOcrPool(Path.Combine(appDir, "tessdata"), @"\d{4,7}", ocrParallelism);
+
+        _logger.LogInformation("PriceBot Worker başladı. IncomingRoot={IncomingRoot} BotSendUrl={BotSendUrl} ExtraRecipients={ExtraRecipients} OcrParalel={OcrParallelism}",
+            IncomingRoot, BotSendUrl, extraRecipients.Count == 0 ? "(boş)" : string.Join(", ", extraRecipients), ocrParallelism);
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -94,6 +102,10 @@ public class Worker : BackgroundService
                     .Where(dir =>
                         !File.Exists(Path.Combine(dir, "islendi.txt")) &&
                         RealXlsxFiles(dir).Any() &&
+                        // Marka sorusu gönderilmiş ama cevap henüz gelmemişse klasöre dokunma:
+                        // her 10 sn'de bir boşuna OCR koşturmamak için. Bot, gelen metin cevabını
+                        // marka_cevap.txt olarak yazınca klasör tekrar işlenebilir hâle gelir.
+                        (!File.Exists(Path.Combine(dir, "marka_sorusu.txt")) || File.Exists(Path.Combine(dir, "marka_cevap.txt"))) &&
                         DateTime.Now - Directory.EnumerateFiles(dir).Select(File.GetLastWriteTime).Max() > TimeSpan.FromSeconds(60))
                     .ToList();
 
@@ -110,7 +122,19 @@ public class Worker : BackgroundService
                     _logger.LogInformation("=== İşleniyor: {Folder} ===", folder);
                     string senderPhone = new DirectoryInfo(folder).Parent!.Name;
 
-                    var excelFile = RealXlsxFiles(folder).First();
+                    // Süreç değişikliği (2026-07-28): birden fazla markanın fotoğraf + Excel'i
+                    // aynı gönderimde gelebiliyor. Böyle klasörler doğrudan işlenmez; önce marka
+                    // gruplarına bölünür — her görsel, OCR kodunun bulunduğu Excel'in grubuna
+                    // atanır, her grup kardeş bir Gonderim klasörüne taşınır ve sonraki turlarda
+                    // normal tek-marka akışıyla bağımsız işlenir (bkz. SplitMultiBrandFolder).
+                    var excelFiles = RealXlsxFiles(folder).ToList();
+                    if (excelFiles.Count > 1)
+                    {
+                        SplitMultiBrandFolder(folder, excelFiles, ocrPool, stoppingToken);
+                        continue;
+                    }
+
+                    var excelFile = excelFiles[0];
                     _logger.LogInformation("Excel okunuyor: {File}", Path.GetFileName(excelFile));
                     var excelPrices = ExcelPriceReader.LoadPricesFromExcel(excelFile, out var skippedExcelRows);
                     _logger.LogInformation("Excel'den {Count} adet ürün fiyatı hafızaya alındı.", excelPrices.Count);
@@ -126,7 +150,14 @@ public class Worker : BackgroundService
                         _logger.LogWarning("USD kuru bulunamadı, klasör {Folder} bu turda atlandı, bir sonraki turda tekrar denenecek.", folder);
                         continue;
                     }
-                    _logger.LogInformation("Kur: 1 USD = {Rate} TRY (kur tarihi: {RateDate:yyyy-MM-dd})", rate.Value.Rate, rate.Value.RateDate);
+                    _logger.LogInformation("Kur: 1 USD = {Rate} TRY (kur tarihi: {RateDate:yyyy-MM-dd}, AllExchangeRates tip 6)", rate.Value.Rate, rate.Value.RateDate);
+
+                    var brandList = await brandProvider.GetBrandMultipliersAsync();
+                    if (brandList.Count == 0)
+                    {
+                        _logger.LogWarning("AS_PWB_MarkaCarpan boş döndü, klasör {Folder} bu turda atlandı, bir sonraki turda tekrar denenecek.", folder);
+                        continue;
+                    }
 
                     var excelCodes = new HashSet<string>(excelPrices.Keys, StringComparer.OrdinalIgnoreCase);
 
@@ -140,12 +171,55 @@ public class Worker : BackgroundService
                         .ToList();
                     _logger.LogInformation("Klasörde {Count} adet desteklenen görsel bulundu.", allFiles.Count);
 
+                    if (allFiles.Count == 0)
+                    {
+                        // Görselsiz klasör (kullanıcı yalnız Excel göndermiş ya da çoklu marka
+                        // bölmesi yarıda kalıp geriye yalnız-Excel'li bir grup klasörü kalmış):
+                        // marka sorusu sormanın anlamı yok, işaretleyip kapat.
+                        _logger.LogWarning("Klasör {Folder} hiç görsel içermiyor — işlem yapılmadan islendi.txt ile kapatıldı.", folder);
+                        File.WriteAllText(Path.Combine(folder, "islendi.txt"),
+                            $"=== PriceBot İşlem Raporu ==={Environment.NewLine}" +
+                            $"Klasör: {folder}{Environment.NewLine}" +
+                            $"Zaman: {DateTime.Now:yyyy-MM-dd HH:mm:ss}{Environment.NewLine}" +
+                            $"Bu klasörde desteklenen görsel bulunamadı (yalnızca Excel); işlem yapılmadı.{Environment.NewLine}",
+                            Encoding.UTF8);
+                        continue;
+                    }
+
                     // Aşama 1: her görselin OCR'ını topla, henüz karar verme. Bir klasördeki her
                     // Excel kodu tek bir ürünü/fotoğrafı temsil eder; bu yüzden aynı kod birden
                     // fazla görselde "eşleşti" çıkarsa (örn. dekoratif fontta bir hane yanlış
                     // okunup başka geçerli bir koda dönüşürse — "1379" -> "1349" gibi), bu bir
                     // OCR hatasının işaretidir, tesadüf değil.
-                    var scans = allFiles.Select(file => (File: file, Scan: ocr.FindProductCodes(file, excelCodes))).ToList();
+                    // Görseller birbirinden bağımsızdır; havuz genişliğinde paralel taranır,
+                    // sonuç dizisi indeksle doldurulduğu için sıra (rapor/atama) korunur.
+                    var scanResults = new ScanResult[allFiles.Count];
+                    var parallelOptions = new ParallelOptions
+                    {
+                        MaxDegreeOfParallelism = ocrPool.Size,
+                        CancellationToken = stoppingToken,
+                    };
+                    Parallel.For(0, allFiles.Count, parallelOptions, i =>
+                    {
+                        var imageTimer = Stopwatch.StartNew();
+                        scanResults[i] = ocrPool.Run(o => o.FindProductCodes(allFiles[i], excelCodes));
+                        _logger.LogInformation("OCR: {File} -> {Matches} eşleşme, {Candidates} aday ({Elapsed:N1} sn)",
+                            Path.GetFileName(allFiles[i]), scanResults[i].Matches.Count, scanResults[i].Candidates.Count,
+                            imageTimer.Elapsed.TotalSeconds);
+                    });
+                    var scans = allFiles.Select((file, i) => (File: file, Scan: scanResults[i])).ToList();
+
+                    // Aşama 1.5: klasör markası tespiti — bir Gonderim klasörü her zaman TEK
+                    // markadır (iş kuralı). Önce (varsa) kullanıcının WhatsApp marka cevabı,
+                    // yoksa tüm görsellerin OCR token birleşimi denenir; ikisi de sonuç
+                    // vermezse gönderene WhatsApp'tan marka sorulur ve klasör, bot cevabı
+                    // marka_cevap.txt olarak yazana kadar bekletilir (islendi.txt yazılmaz).
+                    var brandResolution = await ResolveFolderBrandAsync(
+                        http, folder, senderPhone, Path.GetFileName(excelFile), ocrPool, scans, brandList, stoppingToken);
+                    if (brandResolution is null) continue;
+                    var (brand, brandSource) = brandResolution.Value;
+                    _logger.LogInformation("Klasör markası: {Brand} (NetCarpan={Carpan}, kaynak: {Source})",
+                        brand.FullName, brand.NetCarpan, brandSource);
 
                     // Aşama 2: klasör geneli çakışma çözümü. Tüm (görsel, aday kod) çiftlerini
                     // güvene göre büyükten küçüğe sıralayıp aç gözlü (greedy) ata: bir kod veya
@@ -186,12 +260,24 @@ public class Worker : BackgroundService
                                     ? "Görselden hiçbir sayısal kod adayı okunamadı"
                                     : $"Excel'deki kodlardan biriyle eşleşen bir ürün kodu bulunamadı — OCR'ın okuduğu adaylar: {string.Join(", ", scan.Candidates)}"
                                 : $"Bulunan kod(lar) ({string.Join(", ", scan.Matches.Select(m => m.Code))}) bu klasörde daha yüksek güvenle başka bir görsele atandı, yanlış fiyat riskine karşı atlandı";
+                            // Okunan aday, Excel'de VAR ama fiyatı boş olduğu için yüklenmemiş bir koda
+                            // denk geliyorsa bunu açıkça söyle — "OCR okuyamadı" ile "Excel'de fiyat eksik"
+                            // teşhisleri operatör için tamamen farklı aksiyonlardır (gerçek vaka: 1311).
+                            if (scan.Matches.Count == 0)
+                            {
+                                var priceless = scan.Candidates
+                                    .Where(c => skippedExcelRows.Any(s => string.Equals(s.Code, c, StringComparison.OrdinalIgnoreCase)))
+                                    .ToList();
+                                if (priceless.Count > 0)
+                                    reason += $". DİKKAT: kod(lar) {string.Join(", ", priceless)} Excel'de VAR ama fiyat hücresi boş/geçersiz olduğu için yüklenmemişti — Excel'de fiyat doldurulursa bu görsel işlenebilir";
+                            }
                             _logger.LogWarning("'{File}' atlandı: {Reason}", fileName, reason);
-                            imageResults.Add(new ImageResult(fileName, false, null, null, scan.Matches.Count, null, null, null, reason));
+                            imageResults.Add(new ImageResult(fileName, false, null, null, scan.Matches.Count, null, null, null, null, reason));
                             continue;
                         }
 
-                        decimal priceInTry = excelPrices[best.Code];
+                        decimal priceExcel = excelPrices[best.Code];
+                        decimal priceInTry = priceExcel * brand.NetCarpan;
                         decimal priceInUsd = priceInTry / rate.Value.Rate;
 
                         if (scan.Matches.Count > 1)
@@ -206,23 +292,23 @@ public class Worker : BackgroundService
                             var stamped = PriceStamper.Stamp(file, outputDir, priceInUsd);
                             stampedFiles.Add(stamped);
                             imageResults.Add(new ImageResult(fileName, true, best.Code, best.Confidence, scan.Matches.Count,
-                                priceInTry, priceInUsd, Path.GetFileName(stamped), null, best.IsFuzzy));
+                                priceExcel, priceInTry, priceInUsd, Path.GetFileName(stamped), null, best.IsFuzzy));
                             if (best.IsFuzzy)
                             {
-                                _logger.LogWarning("'{File}' -> YAKLAŞIK (fuzzy) eşleşme, KONTROL ÖNERİLİR: kod {Code} (güven {Confidence:N0}) -> {PriceTry:N2} TRY ({PriceUsd:N2} USD) -> {Output}",
-                                    fileName, best.Code, best.Confidence, priceInTry, priceInUsd, Path.GetFileName(stamped));
+                                _logger.LogWarning("'{File}' -> YAKLAŞIK (fuzzy) eşleşme, KONTROL ÖNERİLİR: kod {Code} (güven {Confidence:N0}) -> {PriceExcel:N2} × {Carpan} = {PriceTry:N2} TRY ({PriceUsd:N2} USD) -> {Output}",
+                                    fileName, best.Code, best.Confidence, priceExcel, brand.NetCarpan, priceInTry, priceInUsd, Path.GetFileName(stamped));
                             }
                             else
                             {
-                                _logger.LogInformation("Eşleşti: {File} -> kod {Code} (güven {Confidence:N0}) -> {PriceTry:N2} TRY ({PriceUsd:N2} USD) -> {Output}",
-                                    fileName, best.Code, best.Confidence, priceInTry, priceInUsd, Path.GetFileName(stamped));
+                                _logger.LogInformation("Eşleşti: {File} -> kod {Code} (güven {Confidence:N0}) -> {PriceExcel:N2} × {Carpan} = {PriceTry:N2} TRY ({PriceUsd:N2} USD) -> {Output}",
+                                    fileName, best.Code, best.Confidence, priceExcel, brand.NetCarpan, priceInTry, priceInUsd, Path.GetFileName(stamped));
                             }
                         }
                         catch (Exception ex)
                         {
                             _logger.LogError(ex, "HATA (Resim basılamadı): {File}", fileName);
                             imageResults.Add(new ImageResult(fileName, true, best.Code, best.Confidence, scan.Matches.Count,
-                                priceInTry, priceInUsd, null, $"Damgalama hatası: {ex.Message}", best.IsFuzzy));
+                                priceExcel, priceInTry, priceInUsd, null, $"Damgalama hatası: {ex.Message}", best.IsFuzzy));
                         }
                     }
 
@@ -245,7 +331,7 @@ public class Worker : BackgroundService
                     var processEnd = DateTime.Now;
 
                     var report = BuildReport(folder, senderPhone, excelFile, excelPrices.Count, skippedExcelRows, rate.Value.Rate, rate.Value.RateDate,
-                        allFiles.Count, imageResults, recipients, sendResults, processStart, processEnd, stopwatch.Elapsed);
+                        brand, brandSource, allFiles.Count, imageResults, recipients, sendResults, processStart, processEnd, stopwatch.Elapsed);
 
                     // islendi.txt, OCR/eşleştirme/damgalama işinin TAMAMLANDIĞINI işaretler (bu iş
                     // pahalı ve idempotent değildir, tekrarlanmamalı). Gönderim başarısız olan
@@ -284,6 +370,157 @@ public class Worker : BackgroundService
         }
 
         _logger.LogInformation("PriceBot Worker durduruluyor.");
+    }
+
+    /// <summary>Klasörün markasını çözer. Öncelik sırası:
+    /// 1) Bot'un yazdığı marka_cevap.txt (kullanıcının WhatsApp cevabı) — eşleşirse marka budur;
+    ///    eşleşmezse cevap marka_cevap_red_*.txt olarak arşivlenir ve önerilerle tekrar sorulur.
+    /// 2) Tüm görsellerin OCR token birleşimi (klasör tek marka olduğu için herhangi bir
+    ///    görselden okunabilen logo yeterlidir).
+    /// 3) İkisi de yoksa gönderene WhatsApp'tan marka sorulur; soru BAŞARIYLA gönderilirse
+    ///    marka_sorusu.txt işaretçisi yazılır ve klasör cevaba kadar taramalarda atlanır.
+    /// null dönerse klasör bu turda işlenmez (soru soruldu / cevap bekleniyor / soru gönderilemedi).</summary>
+    private async Task<(BrandMultiplier Brand, string Source)?> ResolveFolderBrandAsync(
+        HttpClient http,
+        string folder,
+        string senderPhone,
+        string excelName,
+        FullScanOcrPool ocrPool,
+        List<(string File, ScanResult Scan)> scans,
+        List<BrandMultiplier> brandList,
+        CancellationToken ct)
+    {
+        var questionPath = Path.Combine(folder, "marka_sorusu.txt");
+        var answerPath = Path.Combine(folder, "marka_cevap.txt");
+
+        if (File.Exists(answerPath))
+        {
+            var answerText = File.ReadAllText(answerPath, Encoding.UTF8).Trim();
+            var outcome = BrandMatcher.MatchFromUserText(answerText, brandList);
+            if (outcome.Brand is not null)
+            {
+                var note = outcome.Approximate ? ", yazım farkıyla yaklaşık eşleşme" : "";
+                return (outcome.Brand, $"kullanıcı cevabı ('{answerText}'{note})");
+            }
+
+            // Cevap listeyle eşleşmedi: aynı cevabı her turda tekrar işlememek için arşivle,
+            // önerilerle birlikte tekrar sor. Eski soru işaretçisi de silinir ki tekrar-sorma
+            // gönderimi başarısız olursa (örn. bot kapalı) klasör "cevap bekliyor" durumunda
+            // kilitli kalmasın — işaretçisiz klasör bir sonraki turda baştan işlenir ve soru
+            // (öneriler olmadan, genel hâliyle de olsa) yeniden gönderilmeye çalışılır.
+            File.Move(answerPath, Path.Combine(folder, $"marka_cevap_red_{DateTime.Now:yyyyMMdd_HHmmss}.txt"), overwrite: true);
+            File.Delete(questionPath);
+
+            var suggestionText = outcome.Suggestions.Count > 0
+                ? $" Şunlardan birini mi kastettiniz: {string.Join(", ", outcome.Suggestions)}?"
+                : "";
+            var retryQuestion = $"PriceBot: '{answerText}' marka listesinde bulunamadı.{suggestionText} Lütfen '{excelName}' listesindeki ürünler için markanın tam adını tek mesaj olarak tekrar yazınız.";
+            _logger.LogWarning("Klasör {Folder}: marka cevabı '{Answer}' listeyle eşleşmedi, tekrar sorulacak. Öneriler: {Suggestions}",
+                folder, answerText, outcome.Suggestions.Count == 0 ? "(yok)" : string.Join(", ", outcome.Suggestions));
+            await SendBrandQuestionAsync(http, folder, senderPhone, questionPath, retryQuestion, ct);
+            return null;
+        }
+
+        var unionTokens = new Dictionary<string, float>();
+        void MergeTokens(IReadOnlyDictionary<string, float> tokens)
+        {
+            foreach (var (word, conf) in tokens)
+                if (!unionTokens.TryGetValue(word, out var best) || conf > best)
+                    unionTokens[word] = conf;
+        }
+        foreach (var (_, scan) in scans) MergeTokens(scan.Tokens);
+
+        var ocrOutcome = BrandMatcher.MatchFromOcrTokens(unionTokens, brandList);
+
+        // Kurtarma taraması: kod taramasının token'larında marka yoksa, her görselin üst
+        // (logo) şeridi renk-duyarlı (min-RGB) ön işlemeyle yeniden OCR'lanır — renkli logo
+        // harfleri (Baby Flamindo vakası) luminans gri tonlamada kayboluyor. Marka bulunur
+        // bulunmaz durulur; maliyet sadece markasız kalan klasörlerde ödenir.
+        if (ocrOutcome.Brand is null && ocrOutcome.AmbiguousNames.Count == 0)
+        {
+            _logger.LogInformation("Klasör {Folder}: kod taraması token'larında marka bulunamadı, renk-duyarlı (min-RGB) kurtarma taraması deneniyor.", folder);
+            // İlk 4 görselle sınırlı: kurtarma görsel başına ~15-40 sn sürüyor ve 4 görselde
+            // çıkmayan marka yazısının sonrakilerde çıkma olasılığı düşük — soru akışına
+            // düşmeyi dakikalarca geciktirmeye değmez.
+            // Görseller paralel taranır ve karar, token'ların BİRLEŞİMİ üzerinden bir kez
+            // verilir (eski davranış sırayla tarayıp marka bulunur bulunmaz duruyordu;
+            // paralelde erken çıkışın süre avantajı yok, birleşik karar ayrıca ilk görselden
+            // tek marka bulup sonraki görsellerdeki farklı markayı hiç görmeme riskini de
+            // kapatır — farklı çarpanlı çelişki çıkarsa kullanıcıya sorulur).
+            var recoveryFiles = scans.Take(4).Select(s => s.File).ToList();
+            var recoveredTokens = new Dictionary<string, float>[recoveryFiles.Count];
+            var recoveryOptions = new ParallelOptions
+            {
+                MaxDegreeOfParallelism = ocrPool.Size,
+                CancellationToken = ct,
+            };
+            Parallel.For(0, recoveryFiles.Count, recoveryOptions,
+                i => recoveredTokens[i] = ocrPool.Run(o => o.CollectBrandTokens(recoveryFiles[i])));
+            foreach (var tokens in recoveredTokens) MergeTokens(tokens);
+            ocrOutcome = BrandMatcher.MatchFromOcrTokens(unionTokens, brandList);
+        }
+
+        if (ocrOutcome.Brand is not null)
+        {
+            var approxNote = ocrOutcome.Approximate ? ", KESİK/HATALI OKUMADAN yaklaşık eşleşme" : "";
+            return (ocrOutcome.Brand, $"görsel OCR (kanıt: {string.Join(" ", ocrOutcome.MatchedWords)}{approxNote})");
+        }
+
+        if (ocrOutcome.AmbiguousNames.Count > 0)
+        {
+            _logger.LogWarning("Klasör {Folder}: OCR birden fazla çelişkili (farklı çarpanlı) marka buldu ({Brands}), kullanıcıya sorulacak.",
+                folder, string.Join(", ", ocrOutcome.AmbiguousNames));
+        }
+
+        // Soru metnine Excel adı eklenir: çoklu marka gönderimi gruplara bölündüğünde aynı numaraya
+        // birden fazla soru düşebilir; kullanıcı hangi sorunun hangi listeye ait olduğunu kendi
+        // gönderdiği dosyanın adından ayırt eder. Bot, cevabı her zaman en eski bekleyen klasöre
+        // yazdığı için soruların ve cevapların sırası eşleşir (bkz. bot_marka_cevap_gorevi.md).
+        var question = "PriceBot: Gönderdiğiniz fotoğraflardaki ürünlerin markası otomatik tespit edilemedi " +
+                       $"('{excelName}' listesindeki ürünler). Lütfen markanın tam adını tek mesaj olarak yazınız (örnek: LİLAX).";
+        await SendBrandQuestionAsync(http, folder, senderPhone, questionPath, question, ct);
+        return null;
+    }
+
+    /// <summary>Marka sorusunu gönderene iletir ve BAŞARILIYSA marka_sorusu.txt işaretçisini
+    /// yazar — klasör, bot cevabı marka_cevap.txt olarak yazana kadar taramalarda atlanır.
+    /// Gönderim başarısızsa (örn. bot kapalı) işaretçi yazılmaz; klasör bir sonraki turda
+    /// baştan işlenir ve soru tekrar denenir.</summary>
+    private async Task SendBrandQuestionAsync(HttpClient http, string folder, string senderPhone, string questionPath, string question, CancellationToken ct)
+    {
+        var result = await TrySendTextAsync(http, question, senderPhone, ct);
+        if (!result.Success)
+        {
+            _logger.LogWarning("Klasör {Folder}: marka sorusu gönderilemedi ({Status}), bir sonraki turda tekrar denenecek.",
+                folder, result.StatusInfo);
+            return;
+        }
+
+        File.WriteAllText(questionPath,
+            $"Gönderilme zamanı: {DateTime.Now:yyyy-MM-dd HH:mm:ss}{Environment.NewLine}" +
+            $"Alıcı: {senderPhone}{Environment.NewLine}" +
+            $"Soru: {question}{Environment.NewLine}",
+            Encoding.UTF8);
+        _logger.LogInformation("Klasör {Folder}: marka sorusu {Recipient} numarasına gönderildi, cevap bekleniyor.", folder, senderPhone);
+    }
+
+    /// <summary>Bot'a dosyasız düz metin mesaj gönderir (FilePath boş string). Bot tarafının
+    /// boş FilePath'i "sadece metin gönder" olarak yorumlaması gerekir (bkz. CLAUDE.md'deki
+    /// bot sözleşmesi).</summary>
+    private async Task<SendResult> TrySendTextAsync(HttpClient http, string messageText, string recipient, CancellationToken ct)
+    {
+        var body = JsonSerializer.Serialize(new { ToNumber = recipient, MessageText = messageText, FilePath = "" });
+        try
+        {
+            var resp = await http.PostAsync(BotSendUrl, new StringContent(body, Encoding.UTF8, "application/json"), ct);
+            _logger.LogInformation("Metin gönderimi: {Recipient} -> {Status}", recipient, resp.StatusCode);
+            return new SendResult("(metin)", recipient, resp.IsSuccessStatusCode, ((int)resp.StatusCode) + " " + resp.StatusCode);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogError(ex, "Metin gönderim hatası: {Recipient}", recipient);
+            return new SendResult("(metin)", recipient, false, $"HATA: {ex.Message}");
+        }
     }
 
     private async Task<SendResult> TrySendAsync(HttpClient http, string filePath, string recipient, CancellationToken ct)
@@ -347,6 +584,159 @@ public class Worker : BackgroundService
         else WritePendingSends(folder, stillPending);
     }
 
+    /// <summary>Birden fazla fiyat listesi (Excel) içeren bir gönderim klasörünü marka gruplarına böler
+    /// (süreç değişikliği 2026-07-28: birden fazla markanın fotoğraf + Excel'i aynı gönderimde
+    /// gelebiliyor). Gruplama sıraya/zaman damgasına değil VERİYE dayanır: her görselin OCR'dan okunan
+    /// ürün kodu hangi Excel'de bulunuyorsa görsel o Excel'in grubuna aittir. Her grup için telefon
+    /// klasörü altında "&lt;orijinal&gt;_grupN" adlı KARDEŞ bir Gonderim klasörü oluşturulur (alt klasör
+    /// değil — gönderen numara klasör yolundaki parent addan çıkarıldığı için grup klasörleri de aynı
+    /// telefon klasörünün doğrudan çocuğu olmalıdır), Excel + görselleri oraya taşınır; bu klasörler
+    /// sonraki turlarda normal tek-marka akışıyla (kendi marka tespiti, kendi soru/cevap döngüsü, kendi
+    /// islendi.txt raporu) bağımsız işlenir. Kod tabanlı gruplama OCR gerektirdiği için görseller burada
+    /// bir kez, grup klasöründe bir kez daha taranır — kabul edilmiş maliyet (paralel taramayla dakikalar
+    /// düzeyinde); karşılığında tek-marka işleme akışına hiç dokunulmaz.
+    ///
+    /// Kodu okunamayan veya kodu birden fazla Excel'de bulunan (belirsiz) görseller ile hiç görseli
+    /// olmayan Excel'ler orijinal klasörde bırakılır; orijinal klasöre islendi.txt olarak yazılan bölme
+    /// raporu hepsini nedenleriyle listeler.
+    ///
+    /// Kısmi çökme güvenliği: her grupta önce Excel, sonra görseller taşınır. Yarıda kalırsa: orijinal
+    /// klasörde tek Excel kaldıysa normal akışa düşer (taşınmış görseller zaten kendi grubunda işlenir);
+    /// yalnız-Excel'li kalmış bir grup klasörünü de ana döngüdeki görselsiz-klasör koruması soru
+    /// sormadan kapatır. Dosya taşıma LastWriteTime'ı koruduğu için grup klasörleri 60 sn'lik sessizlik
+    /// kuralını beklemeden bir sonraki turda hazırdır.</summary>
+    private void SplitMultiBrandFolder(string folder, List<string> excelFiles, FullScanOcrPool ocrPool, CancellationToken ct)
+    {
+        var folderName = Path.GetFileName(folder);
+        var parentDir = Path.GetDirectoryName(folder)!;
+        _logger.LogInformation("=== Bölünüyor: {Folder} — {Count} adet Excel bulundu (çoklu marka gönderimi) ===",
+            folder, excelFiles.Count);
+
+        // Kod -> hangi Excel'ler(de) geçiyor. Birden fazla Excel'de geçen kodlar grup ayrımı
+        // için kullanılamaz (hangi markanın fiyat listesinden geldiği belirsiz). Fiyatı boş/
+        // geçersiz olduğu için yüklenmeyen kodlar da ayrıca tutulur: görselden okunan bir kod
+        // bu kümedeyse, "OCR okuyamadı" değil "Excel'de fiyat eksik" teşhisi raporlanabilir
+        // (gerçek vaka: BOBİŞKO listesinde 1311'in fiyat hücresi boştu, fotoğrafı atlanmıştı).
+        var codeOwners = new Dictionary<string, List<int>>(StringComparer.OrdinalIgnoreCase);
+        var pricelessCodes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase); // kod -> Excel adı
+        for (int e = 0; e < excelFiles.Count; e++)
+        {
+            var prices = ExcelPriceReader.LoadPricesFromExcel(excelFiles[e], out var skippedRows);
+            foreach (var code in prices.Keys)
+            {
+                if (!codeOwners.TryGetValue(code, out var owners))
+                    codeOwners[code] = owners = [];
+                owners.Add(e);
+            }
+            foreach (var (_, code, _) in skippedRows)
+                if (!string.IsNullOrWhiteSpace(code) && !pricelessCodes.ContainsKey(code))
+                    pricelessCodes[code] = Path.GetFileName(excelFiles[e]);
+        }
+
+        var sharedCodes = codeOwners.Where(kv => kv.Value.Count > 1).Select(kv => kv.Key).ToList();
+        if (sharedCodes.Count > 0)
+        {
+            _logger.LogWarning("Klasör {Folder}: {Count} ürün kodu birden fazla Excel'de birden var ({Codes}) — bu kodlar grup ayrımında kullanılamayacak.",
+                folder, sharedCodes.Count, string.Join(", ", sharedCodes.Take(10)));
+        }
+
+        var unionCodes = new HashSet<string>(codeOwners.Keys, StringComparer.OrdinalIgnoreCase);
+        var images = Directory.EnumerateFiles(folder)
+            .Where(f => SupportedExtensions.Contains(Path.GetExtension(f)))
+            .ToList();
+
+        var scanResults = new ScanResult[images.Count];
+        Parallel.For(0, images.Count,
+            new ParallelOptions { MaxDegreeOfParallelism = ocrPool.Size, CancellationToken = ct },
+            i => scanResults[i] = ocrPool.Run(o => o.FindProductCodes(images[i], unionCodes)));
+
+        // Atama: görselin güvene göre sıralı eşleşmelerinden, TEK bir Excel'e ait ilk kod kazanır.
+        // Aynı kodun birden fazla görselde çıkması burada sorun değil; kod/görsel çakışma çözümü
+        // (greedy atama) her grubun kendi normal işlenmesinde zaten yapılır.
+        var groupImages = excelFiles.Select(_ => new List<(string File, CodeMatch Match)>()).ToList();
+        var unassigned = new List<(string File, string Reason)>();
+        for (int i = 0; i < images.Count; i++)
+        {
+            var pick = scanResults[i].Matches.FirstOrDefault(m => codeOwners[m.Code].Count == 1);
+            if (pick is not null)
+            {
+                groupImages[codeOwners[pick.Code][0]].Add((images[i], pick));
+            }
+            else if (scanResults[i].Matches.Count == 0)
+            {
+                var candidates = scanResults[i].Candidates;
+                var reason = candidates.Count == 0
+                    ? "görselden hiçbir sayısal kod adayı okunamadı"
+                    : $"hiçbir Excel koduyla eşleşen ürün kodu okunamadı — okunan adaylar: {string.Join(", ", candidates.Take(10))}";
+                var priceless = candidates.Where(pricelessCodes.ContainsKey).ToList();
+                if (priceless.Count > 0)
+                    reason += ". DİKKAT: " + string.Join("; ", priceless.Select(c =>
+                        $"kod {c} '{pricelessCodes[c]}' listesinde VAR ama fiyat hücresi boş/geçersiz olduğu için yüklenmemişti")) +
+                        " — Excel'de fiyat doldurulup klasör yeniden gönderilirse bu görsel işlenebilir";
+                unassigned.Add((images[i], reason));
+            }
+            else
+            {
+                unassigned.Add((images[i],
+                    $"okunan kod(lar) ({string.Join(", ", scanResults[i].Matches.Select(m => m.Code))}) birden fazla Excel'de bulunduğu için grup belirlenemedi"));
+            }
+        }
+
+        var sb = new StringBuilder();
+        sb.AppendLine("=== PriceBot Bölme Raporu (çoklu marka gönderimi) ===");
+        sb.AppendLine($"Klasör: {folder}");
+        sb.AppendLine($"Zaman: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+        sb.AppendLine($"Bu gönderimde {excelFiles.Count} fiyat listesi (Excel) bulundu; görseller, OCR ile okunan ürün");
+        sb.AppendLine("kodunun hangi listede yer aldığına göre gruplara ayrıldı. Her grup aşağıdaki kardeş klasörde");
+        sb.AppendLine("normal akışla AYRI işlenecek ve kendi islendi.txt raporunu üretecek:");
+        sb.AppendLine();
+
+        for (int e = 0; e < excelFiles.Count; e++)
+        {
+            var excelName = Path.GetFileName(excelFiles[e]);
+            if (groupImages[e].Count == 0)
+            {
+                sb.AppendLine($"[GRUPSUZ EXCEL] {excelName} -> bu listeye ait hiçbir görsel bulunamadı, dosya bu klasörde bırakıldı.");
+                _logger.LogWarning("Klasör {Folder}: '{Excel}' listesine ait hiçbir görsel bulunamadı, Excel orijinal klasörde bırakıldı.",
+                    folder, excelName);
+                continue;
+            }
+
+            var groupFolder = Path.Combine(parentDir, $"{folderName}_grup{e + 1}");
+            Directory.CreateDirectory(groupFolder);
+            File.Move(excelFiles[e], Path.Combine(groupFolder, excelName));
+            foreach (var (file, _) in groupImages[e])
+                File.Move(file, Path.Combine(groupFolder, Path.GetFileName(file)));
+
+            sb.AppendLine($"[GRUP {e + 1}] {excelName} + {groupImages[e].Count} görsel -> {Path.GetFileName(groupFolder)}");
+            foreach (var (file, match) in groupImages[e])
+                sb.AppendLine($"  {Path.GetFileName(file)} -> kod {match.Code} (güven {match.Confidence:N0}{(match.IsFuzzy ? ", fuzzy" : "")})");
+            _logger.LogInformation("Klasör {Folder}: grup {Index} oluşturuldu — '{Excel}' + {Count} görsel -> {GroupFolder}",
+                folder, e + 1, excelName, groupImages[e].Count, Path.GetFileName(groupFolder));
+        }
+
+        if (unassigned.Count > 0)
+        {
+            sb.AppendLine();
+            foreach (var (file, reason) in unassigned)
+                sb.AppendLine($"[ATANAMADI] {Path.GetFileName(file)} -> {reason} (bu klasörde kaldı, işlenmeyecek)");
+            _logger.LogWarning("Klasör {Folder}: {Count} görsel hiçbir gruba atanamadı, orijinal klasörde bırakıldı (ayrıntı bölme raporunda).",
+                folder, unassigned.Count);
+        }
+
+        if (sharedCodes.Count > 0)
+        {
+            sb.AppendLine();
+            sb.AppendLine($"UYARI: {sharedCodes.Count} ürün kodu birden fazla Excel'de birden bulunduğu için grup ayrımında kullanılamadı: {string.Join(", ", sharedCodes)}");
+        }
+
+        // islendi.txt orijinal klasörü kapatır: buradaki iş bölmeden ibaret, fiyatlama grup
+        // klasörlerinde yapılacak. Atanamayan görseller bu raporla birlikte arşivlenmiş olur.
+        File.WriteAllText(Path.Combine(folder, "islendi.txt"), sb.ToString(), Encoding.UTF8);
+        _logger.LogInformation("=== Bölme tamamlandı: {Folder} — {Groups} grup, {Unassigned} atanamayan görsel. Gruplar sonraki turda işlenecek. ===",
+            folder, groupImages.Count(g => g.Count > 0), unassigned.Count);
+    }
+
     private static string BuildReport(
         string folder,
         string senderPhone,
@@ -355,6 +745,8 @@ public class Worker : BackgroundService
         List<(int Row, string Code, string RawPrice)> skippedExcelRows,
         decimal rateValue,
         DateTime rateDate,
+        BrandMultiplier brand,
+        string brandSource,
         int totalImages,
         List<ImageResult> imageResults,
         List<string> recipients,
@@ -387,7 +779,14 @@ public class Worker : BackgroundService
         sb.AppendLine();
 
         sb.AppendLine("--- Kur ---");
-        sb.AppendLine($"1 USD = {rateValue} TRY (kur tarihi: {rateDate:yyyy-MM-dd}, kaynak: Nebim ERP)");
+        sb.AppendLine($"1 USD = {rateValue} TRY (kur tarihi: {rateDate:yyyy-MM-dd}, kaynak: Nebim AllExchangeRates, tip 6)");
+        sb.AppendLine();
+
+        sb.AppendLine("--- Marka ---");
+        sb.AppendLine($"Marka: {brand.FullName} (önek: {brand.OnEk})");
+        sb.AppendLine($"NetCarpan: {brand.NetCarpan}");
+        sb.AppendLine($"Tespit kaynağı: {brandSource}");
+        sb.AppendLine($"Fiyat formülü: Excel fiyatı × {brand.NetCarpan} ÷ {rateValue} = USD");
         sb.AppendLine();
 
         sb.AppendLine($"--- Görseller (toplam: {totalImages}, damgalanan: {matched.Count}, atlanan/hatalı: {skippedOrFailed.Count}) ---");
@@ -397,7 +796,7 @@ public class Worker : BackgroundService
             {
                 var candidateNote = r.CandidateCount > 1 ? $", {r.CandidateCount} aday arasından seçildi" : "";
                 var tag = r.IsFuzzy ? "[DAMGALANDI-FUZZY, KONTROL ÖNERİLİR]" : "[DAMGALANDI]";
-                sb.AppendLine($"{tag} {r.FileName} -> kod {r.Code} (güven {r.Confidence:N0}{candidateNote}) -> {r.PriceTry:N2} TRY / {r.PriceUsd:N2} USD -> {r.OutputFileName}");
+                sb.AppendLine($"{tag} {r.FileName} -> kod {r.Code} (güven {r.Confidence:N0}{candidateNote}) -> {r.PriceExcel:N2} × {brand.NetCarpan} = {r.PriceTry:N2} TRY / {r.PriceUsd:N2} USD -> {r.OutputFileName}");
             }
             else if (r.Code is not null)
             {

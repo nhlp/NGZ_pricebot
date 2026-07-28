@@ -50,15 +50,40 @@
 // bir Excel koduna 1 mesafede olabiliyor ve tek aday olarak fuzzy'den geçebiliyordu
 // (gerçek vaka: "51005" -> 5005). Sıralama bilinçli: önce mevcut adaptif geçişler
 // (kesik-çizgili/düşük kontrastlı fontlar), bulamazlarsa gri dilimler (bubble fontlar).
+//
+// v8 (performans, 2026-07-28): OCR/eşleştirme davranışı değişmeden iç yapı hızlandırıldı —
+//  (a) piksel işlemleri SKBitmap.GetPixel/SetPixel (çağrı başına yüksek ek yük) yerine
+//      span/byte-dizisi üzerinden yapılır; tüm ara görüntüler Bgra8888'e normalize edilip
+//      gri değerler düz byte[] tamponlarında işlenir,
+//  (b) kaynak görsel geçiş başına değil, görsel başına BİR kez decode edilir; kırpma +
+//      ölçekleme + renk dönüşümü tek canvas çiziminde birleşir,
+//  (c) hazırlanan görüntüler geçici PNG dosyası yerine bellekten (Pix.LoadFromMemory)
+//      Tesseract'a verilir ve her hazırlanan görüntü 4 motor/psm geçişi için bir kez
+//      yüklenir (eskiden aynı PNG diskten 4 kez okunuyordu),
+//  (d) paralel klasör taraması için dosyanın sonunda FullScanOcrPool eklendi —
+//      TesseractEngine thread-safe DEĞİLDİR, her FullScanOcr örneği aynı anda tek iş
+//      parçacığı tarafından kullanılmalıdır; havuz bunu garanti eder,
+//  (e) rakam-only motor artık koşullu: yalnızca normal motorun token'ları hiçbir Excel
+//      koduyla eşleşmediğinde çalışır (kolay görsellerde geçiş sayısı yarıya iner) ve
+//      marka taramasında (CollectBrandTokens) hiç çalışmaz — saf rakam token'ları marka
+//      eşleştirmesinde kullanılamaz (BrandMatcher rakam→harf düzeltmesini yalnızca
+//      harf+rakam KARIŞIK kelimelere uygular, bkz. BrandMatcher.cs).
 namespace PriceBotPipeline;
 
+using System.Collections.Concurrent;
+using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 using SkiaSharp;
 using Tesseract;
 
 
 public sealed record CodeMatch(string Code, float Confidence, bool IsFuzzy = false);
-public sealed record ScanResult(List<CodeMatch> Matches, List<string> Candidates, string RawTokens);
+
+/// <summary>Tokens: OCR geçişlerinde toplanan TÜM ham kelimeler → en yüksek güven skoru.
+/// Ürün kodu eşleştirmesinin yan ürünüdür ama marka tespiti de (BrandMatcher) ek bir OCR
+/// maliyeti ödemeden bu havuzu kullanır. İlk geçiş her zaman görselin tamamını taradığı
+/// için marka logosu (okunabildiyse) bu havuzda bulunur.</summary>
+public sealed record ScanResult(List<CodeMatch> Matches, List<string> Candidates, Dictionary<string, float> Tokens);
 
 public sealed class FullScanOcr : IDisposable
 {
@@ -88,91 +113,103 @@ public sealed class FullScanOcr : IDisposable
 
     public ScanResult FindProductCodes(string imagePath, IReadOnlySet<string> excelCodes)
     {
-        var prepared = new List<string>(3) { Preprocess(imagePath) };
-        try
+        using var src = SKBitmap.Decode(imagePath)
+            ?? throw new InvalidDataException($"Görsel açılamadı: {imagePath}");
+
+        var tokens = CollectTokens(Preprocess(src), excelCodes);
+        var extracted = ExtractCandidates(tokens);
+        var matches = MatchExact(extracted, excelCodes);
+
+        if (matches.Count == 0)
         {
-            var tokens = CollectTokens(prepared[0]);
-            var extracted = ExtractCandidates(tokens);
-            var matches = MatchExact(extracted, excelCodes);
+            // İkinci deneme: yerel adaptif eşikleme + çizgi-köprüleme. Sadece
+            // ilk (global kontrast germeli) geçiş hiçbir Excel koduyla exact
+            // eşleşmediğinde çalışır — düşük yerel kontrastlı / kesik-çizgili
+            // dekoratif fontları kurtarmak için.
+            MergeTokens(tokens, CollectTokens(PreprocessAdaptive(src), excelCodes));
 
-            if (matches.Count == 0)
-            {
-                // İkinci deneme: yerel adaptif eşikleme + çizgi-köprüleme. Sadece
-                // ilk (global kontrast germeli) geçiş hiçbir Excel koduyla exact
-                // eşleşmediğinde çalışır — düşük yerel kontrastlı / kesik-çizgili
-                // dekoratif fontları kurtarmak için.
-                prepared.Add(PreprocessAdaptive(imagePath));
-                MergeTokens(tokens, CollectTokens(prepared[^1]));
-
-                extracted = ExtractCandidates(tokens);
-                matches = MatchExact(extracted, excelCodes);
-            }
-
-            if (matches.Count == 0)
-            {
-                // Üçüncü deneme: alt %35'lik şerit, 4x büyütme + adaptif eşikleme.
-                // Kod bu şeritte değilse zaten hiçbir aday çıkmaz, zararsız.
-                prepared.Add(PreprocessEdgeStrip(imagePath, fromTop: false));
-                MergeTokens(tokens, CollectTokens(prepared[^1]));
-
-                extracted = ExtractCandidates(tokens);
-                matches = MatchExact(extracted, excelCodes);
-            }
-
-            if (matches.Count == 0)
-            {
-                // Dördüncü deneme: aynısı ama üst %35'lik şerit için — kod bazı etiketlerde
-                // alt yerine üstte de olabilir (örn. marka logosunun hemen altında).
-                prepared.Add(PreprocessEdgeStrip(imagePath, fromTop: true));
-                MergeTokens(tokens, CollectTokens(prepared[^1]));
-
-                extracted = ExtractCandidates(tokens);
-                matches = MatchExact(extracted, excelCodes);
-            }
-
-            if (matches.Count == 0)
-            {
-                // Beşinci deneme (v6): DAR gri tonlamalı dilimler — adaptif eşikleme OLMADAN,
-                // sadece kırpma + 4x büyütme + gri. Kalın yuvarlak (bubble) fontları adaptif
-                // eşikleme bozuyor; eşiklemesiz hâlde sorunsuz okunuyorlar. Tam genişlik şerit
-                // de İŞE YARAMIYOR (yanlardaki fotoğraf içeriği Tesseract'ın segmentasyonunu
-                // bozuyor — Bebly 20020 ile denendi), bu yüzden üst ve alt %20'lik bant,
-                // yatayda birbiriyle örtüşen üçte-birlik dilimlere bölünür ve dilimler tek tek
-                // denenir. Önce üst-orta (Bebly tipi kolajlarda kodun olduğu yer), eşleşme
-                // bulunan ilk dilimde durulur.
-                foreach (var (fromTop, xFrom, xTo) in new[]
-                {
-                    (true,  0.25, 0.75), (true,  0.0, 0.5), (true,  0.5, 1.0),
-                    (false, 0.25, 0.75), (false, 0.0, 0.5), (false, 0.5, 1.0),
-                })
-                {
-                    prepared.Add(PreprocessTileGray(imagePath, fromTop, xFrom, xTo));
-                    MergeTokens(tokens, CollectTokens(prepared[^1]));
-
-                    extracted = ExtractCandidates(tokens);
-                    matches = MatchExact(extracted, excelCodes);
-                    if (matches.Count > 0) break;
-                }
-            }
-
-            var candidates = extracted.Keys.ToList();
-
-            // Son çare: exact match yoksa, Excel'deki bilinen kodları OCR adaylarında
-            // 1 karakter farkla ara. Sadece tek ve belirsiz olmayan bir sonuç varsa kabul et.
-            if (matches.Count == 0 && candidates.Count > 0)
-            {
-                var fuzzy = TryFuzzyMatch(candidates, extracted, excelCodes);
-                if (fuzzy is not null)
-                    matches.Add(fuzzy);
-            }
-
-            return new ScanResult(matches, candidates,
-                                  string.Join(" ", tokens.Keys));
+            extracted = ExtractCandidates(tokens);
+            matches = MatchExact(extracted, excelCodes);
         }
-        finally
+
+        if (matches.Count == 0)
         {
-            foreach (var p in prepared) File.Delete(p);
+            // Üçüncü deneme: alt %35'lik şerit, 4x büyütme + adaptif eşikleme.
+            // Kod bu şeritte değilse zaten hiçbir aday çıkmaz, zararsız.
+            MergeTokens(tokens, CollectTokens(PreprocessEdgeStrip(src, fromTop: false), excelCodes));
+
+            extracted = ExtractCandidates(tokens);
+            matches = MatchExact(extracted, excelCodes);
         }
+
+        if (matches.Count == 0)
+        {
+            // Dördüncü deneme: aynısı ama üst %35'lik şerit için — kod bazı etiketlerde
+            // alt yerine üstte de olabilir (örn. marka logosunun hemen altında).
+            MergeTokens(tokens, CollectTokens(PreprocessEdgeStrip(src, fromTop: true), excelCodes));
+
+            extracted = ExtractCandidates(tokens);
+            matches = MatchExact(extracted, excelCodes);
+        }
+
+        if (matches.Count == 0)
+        {
+            // Beşinci deneme (v6): DAR gri tonlamalı dilimler — adaptif eşikleme OLMADAN,
+            // sadece kırpma + 4x büyütme + gri. Kalın yuvarlak (bubble) fontları adaptif
+            // eşikleme bozuyor; eşiklemesiz hâlde sorunsuz okunuyorlar. Tam genişlik şerit
+            // de İŞE YARAMIYOR (yanlardaki fotoğraf içeriği Tesseract'ın segmentasyonunu
+            // bozuyor — Bebly 20020 ile denendi), bu yüzden üst ve alt %20'lik bant,
+            // yatayda birbiriyle örtüşen üçte-birlik dilimlere bölünür ve dilimler tek tek
+            // denenir. Önce üst-orta (Bebly tipi kolajlarda kodun olduğu yer), eşleşme
+            // bulunan ilk dilimde durulur.
+            foreach (var (fromTop, xFrom, xTo) in new[]
+            {
+                (true,  0.25, 0.75), (true,  0.0, 0.5), (true,  0.5, 1.0),
+                (false, 0.25, 0.75), (false, 0.0, 0.5), (false, 0.5, 1.0),
+            })
+            {
+                MergeTokens(tokens, CollectTokens(PreprocessTileGray(src, fromTop, xFrom, xTo), excelCodes));
+
+                extracted = ExtractCandidates(tokens);
+                matches = MatchExact(extracted, excelCodes);
+                if (matches.Count > 0) break;
+            }
+        }
+
+        var candidates = extracted.Keys.ToList();
+
+        // Son çare: exact match yoksa, Excel'deki bilinen kodları OCR adaylarında
+        // 1 karakter farkla ara. Sadece tek ve belirsiz olmayan bir sonuç varsa kabul et.
+        if (matches.Count == 0 && candidates.Count > 0)
+        {
+            var fuzzy = TryFuzzyMatch(candidates, extracted, excelCodes);
+            if (fuzzy is not null)
+                matches.Add(fuzzy);
+        }
+
+        return new ScanResult(matches, candidates, tokens);
+    }
+
+    /// <summary>Marka-yazısı kurtarma taraması (v7): normal kod taraması markayı bulamadığında
+    /// çağrılır. Gerçek vaka (Baby Flamindo, 2026-07-27): marka yazısı iki yerde olabiliyor —
+    /// üstteki logo (harflerinin bir kısmı RENKLİ: sarı I, turuncu N, mavi yıldız A; luminans
+    /// gri tonlamasında beyaz zeminde kaybolurlar) ve kıyafetin üzerindeki ton-üstü-ton
+    /// nakış/baskı ("FLAMINDO" — normal taramada ancak "FLAMI" olarak kesik okunabildi).
+    /// Min-RGB ("en koyu kanal") dönüşümü her renkli harfin en az bir koyu kanalını kullanarak
+    /// kontrastı artırır. Üç geçiş: üst %20 bandın iki örtüşen dilimi (logo) + tam görsel
+    /// (nakış/baskı). v6 dersi geçerli: eşikleme YOK, binarizasyon Tesseract'a bırakılır.
+    /// Rakam-only motor burada hiç çalıştırılmaz (v8e) — marka araması için anlamsızdır.</summary>
+    public Dictionary<string, float> CollectBrandTokens(string imagePath)
+    {
+        using var src = SKBitmap.Decode(imagePath)
+            ?? throw new InvalidDataException($"Görsel açılamadı: {imagePath}");
+
+        var tokens = new Dictionary<string, float>();
+        foreach (var (xFrom, xTo) in new[] { (0.0, 0.55), (0.45, 1.0) })
+            MergeTokens(tokens, CollectTokens(PreprocessTileMinChannel(src, xFrom, xTo), excelCodes: null));
+
+        MergeTokens(tokens, CollectTokens(PreprocessFullMinChannel(src), excelCodes: null));
+        return tokens;
     }
 
     private static void MergeTokens(Dictionary<string, float> into, Dictionary<string, float> from)
@@ -182,21 +219,34 @@ public sealed class FullScanOcr : IDisposable
                 into[word] = conf;
     }
 
-    /// <summary>Normal motor + rakam-only motor, her ikisi de SparseText/Auto ile — 4 geçiş.
-    /// Aynı token birden fazla geçişte çıkarsa yüksek güven skoru tutulur.</summary>
-    private Dictionary<string, float> CollectTokens(string preparedImagePath)
+    /// <summary>Normal motor SparseText/Auto ile her zaman çalışır; rakam-only motor İSTEĞE BAĞLIDIR
+    /// (v8e): yalnızca excelCodes verilmişse VE normal motorun token'ları henüz hiçbir Excel koduyla
+    /// exact eşleşmemişse çalışır — kolay görsellerde motor geçişi yarıya iner. Marka taraması
+    /// (excelCodes=null) rakam motorunu hiç çalıştırmaz: saf rakam token'ları marka eşleştirmesinde
+    /// kullanılmaz (BrandMatcher rakam→harf düzeltmesini sadece harf+rakam karışık kelimelere uygular).
+    /// Hazırlanan PNG bellekten bir kez Pix'e yüklenir ve tüm geçişlerde aynı Pix kullanılır;
+    /// aynı token birden fazla geçişte çıkarsa yüksek güven skoru tutulur.</summary>
+    private Dictionary<string, float> CollectTokens(byte[] preparedPng, IReadOnlySet<string>? excelCodes)
     {
         var tokens = new Dictionary<string, float>();
+        using var pix = Pix.LoadFromMemory(preparedPng);
         foreach (var psm in new[] { PageSegMode.SparseText, PageSegMode.Auto })
-        {
-            foreach (var (word, conf) in ReadWords(_engine, preparedImagePath, psm))
+            foreach (var (word, conf) in ReadWords(_engine, pix, psm))
                 if (!tokens.TryGetValue(word, out var best) || conf > best)
                     tokens[word] = conf;
 
-            foreach (var (word, conf) in ReadWords(_digitsEngine, preparedImagePath, psm))
-                if (!tokens.TryGetValue(word, out var best) || conf > best)
-                    tokens[word] = conf;
+        // Rakam motoru, İngilizce sözlük varsayımının bozduğu rakam dizilerini kurtarmak için var
+        // (v3 notu); normal motor kodu zaten okuduysa katkısı kalmaz. Kod rakam motorundan daha
+        // yüksek güvenle de okunabilirdi ama kademeli tasarımın geri kalanıyla tutarlı davranılır:
+        // eşleşme bulunduysa daha fazla arama yapılmaz.
+        if (excelCodes is not null && MatchExact(ExtractCandidates(tokens), excelCodes).Count == 0)
+        {
+            foreach (var psm in new[] { PageSegMode.SparseText, PageSegMode.Auto })
+                foreach (var (word, conf) in ReadWords(_digitsEngine, pix, psm))
+                    if (!tokens.TryGetValue(word, out var best) || conf > best)
+                        tokens[word] = conf;
         }
+
         return tokens;
     }
 
@@ -292,9 +342,8 @@ public sealed class FullScanOcr : IDisposable
         return new string(chars);
     }
 
-    private static IEnumerable<(string Word, float Conf)> ReadWords(TesseractEngine engine, string pngPath, PageSegMode psm)
+    private static IEnumerable<(string Word, float Conf)> ReadWords(TesseractEngine engine, Pix pix, PageSegMode psm)
     {
-        using var pix = Pix.LoadFromFile(pngPath);
         using var page = engine.Process(pix, psm);
         using var iter = page.GetIterator();
         iter.Begin();
@@ -308,57 +357,39 @@ public sealed class FullScanOcr : IDisposable
         } while (iter.Next(PageIteratorLevel.Word));
     }
 
+    // ---- Ön işleme (v8): tüm yollar "RenderRegion -> gri byte[] tamponu -> Gray8 PNG" ----
+
     /// <summary>2x büyütme + gri tonlama + global kontrast germe.
     /// WhatsApp/JPEG sıkıştırmasının yumuşattığı harf kenarlarını telafi eder.</summary>
-    private static string Preprocess(string imagePath)
+    private static byte[] Preprocess(SKBitmap src)
     {
-        using var src = SKBitmap.Decode(imagePath)
-            ?? throw new InvalidDataException($"Görsel açılamadı: {imagePath}");
+        using var scaled = RenderRegion(src, new SKRectI(0, 0, src.Width, src.Height), src.Width * 2, src.Height * 2);
+        var gray = ToGrayBuffer(scaled);
 
-        var info = new SKImageInfo(src.Width * 2, src.Height * 2);
-        using var scaled = src.Resize(info, SKFilterQuality.High);
-
-        // Tek geçişte gri tonlama + min/max tespiti
-        var gray = new byte[info.Width * info.Height];
         byte min = 255, max = 0;
-        int i = 0;
-        for (int y = 0; y < info.Height; y++)
-        for (int x = 0; x < info.Width; x++, i++)
+        foreach (var g in gray)
         {
-            var c = scaled.GetPixel(x, y);
-            var g = (byte)(0.299 * c.Red + 0.587 * c.Green + 0.114 * c.Blue);
-            gray[i] = g;
             if (g < min) min = g;
             if (g > max) max = g;
         }
 
         // Kontrast germe (autocontrast): [min,max] aralığını [0,255]'e yay
-        using var mono = new SKBitmap(info);
         float range = Math.Max(1, max - min);
-        i = 0;
-        for (int y = 0; y < info.Height; y++)
-        for (int x = 0; x < info.Width; x++, i++)
-        {
-            var v = (byte)((gray[i] - min) / range * 255);
-            mono.SetPixel(x, y, new SKColor(v, v, v));
-        }
+        for (int i = 0; i < gray.Length; i++)
+            gray[i] = (byte)((gray[i] - min) / range * 255);
 
-        return SavePng(mono);
+        return EncodeGrayPng(gray, scaled.Width, scaled.Height);
     }
 
     /// <summary>Yerel (pencere bazlı) adaptif eşikleme + hafif dilation. Görselin geneli
     /// yüksek dinamik aralığa sahip olsa bile, kod bölgesindeki düşük YEREL kontrastı
     /// (örn. krem zemin üstü krem rakam) her pencerede kendi ortalamasına göre değerlendirerek
     /// ortaya çıkarır. Dilation, dekoratif "kesik çizgili" fontlardaki boşlukları köprüler.</summary>
-    private static string PreprocessAdaptive(string imagePath)
+    private static byte[] PreprocessAdaptive(SKBitmap src)
     {
-        using var src = SKBitmap.Decode(imagePath)
-            ?? throw new InvalidDataException($"Görsel açılamadı: {imagePath}");
-
-        var info = new SKImageInfo(src.Width * 2, src.Height * 2);
-        using var scaled = src.Resize(info, SKFilterQuality.High);
-        using var processed = AdaptiveThreshold(scaled);
-        return SavePng(processed);
+        using var scaled = RenderRegion(src, new SKRectI(0, 0, src.Width, src.Height), src.Width * 2, src.Height * 2);
+        var binary = AdaptiveThreshold(ToGrayBuffer(scaled), scaled.Width, scaled.Height);
+        return EncodeGrayPng(binary, scaled.Width, scaled.Height);
     }
 
     /// <summary>Görselin alt VEYA üst %35'lik şeridini (tam genişlik) kırpıp 4x büyütür, sonra
@@ -366,21 +397,14 @@ public sealed class FullScanOcr : IDisposable
     /// birinde, kendi satırında duruyor (marka logosunun altında ya da fotoğrafın en altında);
     /// kırpma dikkat dağıtan diğer unsurları eler ve kalan küçük alanı çok daha yüksek oranda
     /// büyütmeyi mümkün kılar. Kod bu şeritte değilse bu basitçe aday üretmez, zararsızdır.</summary>
-    private static string PreprocessEdgeStrip(string imagePath, bool fromTop)
+    private static byte[] PreprocessEdgeStrip(SKBitmap src, bool fromTop)
     {
-        using var src = SKBitmap.Decode(imagePath)
-            ?? throw new InvalidDataException($"Görsel açılamadı: {imagePath}");
-
         int stripHeight = Math.Max(1, (int)(src.Height * 0.35));
         int top = fromTop ? 0 : src.Height - stripHeight;
-        using var crop = new SKBitmap(src.Width, stripHeight);
-        using (var canvas = new SKCanvas(crop))
-            canvas.DrawBitmap(src, new SKRect(0, top, src.Width, top + stripHeight), new SKRect(0, 0, src.Width, stripHeight));
 
-        var info = new SKImageInfo(crop.Width * 4, crop.Height * 4);
-        using var scaled = crop.Resize(info, SKFilterQuality.High);
-        using var processed = AdaptiveThreshold(scaled);
-        return SavePng(processed);
+        using var scaled = RenderRegion(src, new SKRectI(0, top, src.Width, top + stripHeight), src.Width * 4, stripHeight * 4);
+        var binary = AdaptiveThreshold(ToGrayBuffer(scaled), scaled.Width, scaled.Height);
+        return EncodeGrayPng(binary, scaled.Width, scaled.Height);
     }
 
     /// <summary>Üst veya alt %20'lik bandın, yatayda [xFrom, xTo] aralığındaki dilimini kırpıp
@@ -388,57 +412,135 @@ public sealed class FullScanOcr : IDisposable
     /// fontları her tür eşikleme bozuyor, bkz. dosya başındaki v6 notu; binarizasyon Tesseract'ın
     /// kendi iç mekanizmasına bırakılır). Dilim dar tutulur ki çevredeki fotoğraf içeriği
     /// Tesseract'ın segmentasyonunu bozmasın.</summary>
-    private static string PreprocessTileGray(string imagePath, bool fromTop, double xFrom, double xTo)
+    private static byte[] PreprocessTileGray(SKBitmap src, bool fromTop, double xFrom, double xTo)
     {
-        using var src = SKBitmap.Decode(imagePath)
-            ?? throw new InvalidDataException($"Görsel açılamadı: {imagePath}");
-
         int bandHeight = Math.Max(1, (int)(src.Height * 0.20));
         int top = fromTop ? 0 : src.Height - bandHeight;
         int x1 = (int)(src.Width * xFrom);
         int x2 = Math.Max(x1 + 1, (int)(src.Width * xTo));
 
-        using var crop = new SKBitmap(x2 - x1, bandHeight);
-        using (var canvas = new SKCanvas(crop))
-            canvas.DrawBitmap(src, new SKRect(x1, top, x2, top + bandHeight), new SKRect(0, 0, crop.Width, crop.Height));
-
-        var info = new SKImageInfo(crop.Width * 4, crop.Height * 4);
-        using var scaled = crop.Resize(info, SKFilterQuality.High);
-        using var processed = ToGrayscale(scaled);
-        return SavePng(processed);
+        using var scaled = RenderRegion(src, new SKRectI(x1, top, x2, top + bandHeight), (x2 - x1) * 4, bandHeight * 4);
+        var gray = ToGrayBuffer(scaled);
+        return EncodeGrayPng(gray, scaled.Width, scaled.Height);
     }
 
-    /// <summary>Sadece gri tonlama — eşikleme/kontrast germe yok. Kalın yuvarlak (bubble)
-    /// fontlarda her tür eşikleme rakam konturlarını bozduğu için görüntü "dokunulmamış"
-    /// bırakılır, binarizasyon Tesseract'ın kendi iç mekanizmasına kalır.</summary>
-    private static SKBitmap ToGrayscale(SKBitmap scaled)
+    /// <summary>Üst %20'lik bandın [xFrom, xTo] dilimini kırpıp büyütür ve min-RGB
+    /// ("en koyu kanal") gri dönüşümü uygular: piksel değeri = min(R, G, B). Beyaz zemin
+    /// üzerindeki RENKLİ logo harflerini (sarı, turuncu, mavi...) koyulaştırır — luminans
+    /// gri tonlamasında bu harfler kaybolur (örn. sarı ≈ %89 parlaklık) ama en az bir
+    /// kanalları her zaman koyudur. Eşikleme yok (bkz. v6 notu).</summary>
+    private static byte[] PreprocessTileMinChannel(SKBitmap src, double xFrom, double xTo)
     {
-        var outBitmap = new SKBitmap(new SKImageInfo(scaled.Width, scaled.Height));
-        for (int y = 0; y < scaled.Height; y++)
-        for (int x = 0; x < scaled.Width; x++)
-        {
-            var c = scaled.GetPixel(x, y);
-            var g = (byte)(0.299 * c.Red + 0.587 * c.Green + 0.114 * c.Blue);
-            outBitmap.SetPixel(x, y, new SKColor(g, g, g));
-        }
-        return outBitmap;
+        int bandHeight = Math.Max(1, (int)(src.Height * 0.20));
+        int x1 = (int)(src.Width * xFrom);
+        int x2 = Math.Max(x1 + 1, (int)(src.Width * xTo));
+        int cropWidth = x2 - x1;
+
+        // Sabit 4x yerine hedef genişliğe göre ölçek: kaynak görsel zaten yüksek çözünürlükse
+        // 4x aşırı büyütür ve Tesseract'ın segmentasyonunu bozar (harf yüksekliği optimalin
+        // çok üstüne çıkar); küçük görsellerde ise 4x'e kadar çıkılır.
+        int factor = Math.Clamp((int)Math.Ceiling(2200.0 / cropWidth), 1, 4);
+        using var scaled = RenderRegion(src, new SKRectI(x1, 0, x2, bandHeight), cropWidth * factor, bandHeight * factor);
+        var mono = ToMinChannelBuffer(scaled);
+        return EncodeGrayPng(mono, scaled.Width, scaled.Height);
     }
 
-    /// <summary>Zaten ölçeklenmiş bir bitmap üzerinde yerel (pencere bazlı) adaptif eşikleme +
-    /// hafif dilation uygular ve sonucu siyah/beyaz bir bitmap olarak döner.</summary>
-    private static SKBitmap AdaptiveThreshold(SKBitmap scaled)
+    /// <summary>Tam görsel, 2x + min-RGB gri — kıyafet üzerindeki ton-üstü-ton nakış/baskı
+    /// marka yazısı için (konumu görselden görsele değiştiği için kırpılmaz).</summary>
+    private static byte[] PreprocessFullMinChannel(SKBitmap src)
     {
-        int w = scaled.Width, h = scaled.Height;
+        using var scaled = RenderRegion(src, new SKRectI(0, 0, src.Width, src.Height), src.Width * 2, src.Height * 2);
+        var mono = ToMinChannelBuffer(scaled);
+        return EncodeGrayPng(mono, scaled.Width, scaled.Height);
+    }
 
-        var gray = new int[w * h];
-        int i = 0;
+    /// <summary>Kaynağın verilen bölgesini tek canvas çiziminde kırpar + hedef boyuta ölçekler
+    /// ve renk tipini Bgra8888'e normalize eder (decode edilen görselin kendi renk tipi ne
+    /// olursa olsun) — sonraki span okumaları bu sabit yerleşime güvenir.</summary>
+    private static SKBitmap RenderRegion(SKBitmap src, SKRectI srcRect, int outWidth, int outHeight)
+    {
+        var dst = new SKBitmap(new SKImageInfo(outWidth, outHeight, SKColorType.Bgra8888, SKAlphaType.Premul));
+        using var canvas = new SKCanvas(dst);
+        using var paint = new SKPaint { FilterQuality = SKFilterQuality.High };
+        canvas.DrawBitmap(src, new SKRect(srcRect.Left, srcRect.Top, srcRect.Right, srcRect.Bottom),
+            new SKRect(0, 0, outWidth, outHeight), paint);
+        return dst;
+    }
+
+    /// <summary>Bgra8888 bitmap'ten luminans gri tamponu (satır başına RowBytes hizalamasına dikkat ederek).</summary>
+    private static byte[] ToGrayBuffer(SKBitmap bgra)
+    {
+        int w = bgra.Width, h = bgra.Height, rowBytes = bgra.RowBytes;
+        var span = bgra.GetPixelSpan();
+        var gray = new byte[w * h];
         for (int y = 0; y < h; y++)
-        for (int x = 0; x < w; x++, i++)
         {
-            var c = scaled.GetPixel(x, y);
-            gray[i] = (int)(0.299 * c.Red + 0.587 * c.Green + 0.114 * c.Blue);
+            var row = span.Slice(y * rowBytes, w * 4);
+            int o = y * w;
+            for (int x = 0; x < w; x++)
+            {
+                int p = x * 4; // B, G, R, A
+                gray[o + x] = (byte)((299 * row[p + 2] + 587 * row[p + 1] + 114 * row[p]) / 1000);
+            }
+        }
+        return gray;
+    }
+
+    /// <summary>Bgra8888 bitmap'ten min-RGB ("en koyu kanal") gri tamponu.</summary>
+    private static byte[] ToMinChannelBuffer(SKBitmap bgra)
+    {
+        int w = bgra.Width, h = bgra.Height, rowBytes = bgra.RowBytes;
+        var span = bgra.GetPixelSpan();
+        var mono = new byte[w * h];
+        for (int y = 0; y < h; y++)
+        {
+            var row = span.Slice(y * rowBytes, w * 4);
+            int o = y * w;
+            for (int x = 0; x < w; x++)
+            {
+                int p = x * 4;
+                mono[o + x] = Math.Min(row[p], Math.Min(row[p + 1], row[p + 2]));
+            }
+        }
+        return mono;
+    }
+
+    /// <summary>Gri tamponu Gray8 bitmap'e yazıp PNG olarak belleğe encode eder (disk yok).
+    /// Gray8 PNG encode'u desteklenmezse Bgra8888'e çevirip tekrar dener.</summary>
+    private static byte[] EncodeGrayPng(byte[] gray, int w, int h)
+    {
+        using var bmp = new SKBitmap(new SKImageInfo(w, h, SKColorType.Gray8, SKAlphaType.Opaque));
+        var ptr = bmp.GetPixels();
+        int rowBytes = bmp.RowBytes;
+        if (rowBytes == w)
+        {
+            Marshal.Copy(gray, 0, ptr, w * h);
+        }
+        else
+        {
+            for (int y = 0; y < h; y++)
+                Marshal.Copy(gray, y * w, IntPtr.Add(ptr, y * rowBytes), w);
         }
 
+        using (var img = SKImage.FromBitmap(bmp))
+        using (var data = img.Encode(SKEncodedImageFormat.Png, 100))
+        {
+            if (data is not null) return data.ToArray();
+        }
+
+        using var converted = new SKBitmap(new SKImageInfo(w, h, SKColorType.Bgra8888, SKAlphaType.Premul));
+        using (var canvas = new SKCanvas(converted))
+            canvas.DrawBitmap(bmp, 0, 0);
+        using var img2 = SKImage.FromBitmap(converted);
+        using var data2 = img2.Encode(SKEncodedImageFormat.Png, 100)
+            ?? throw new InvalidOperationException("PNG encode başarısız.");
+        return data2.ToArray();
+    }
+
+    /// <summary>Gri tampon üzerinde yerel (pencere bazlı) adaptif eşikleme + hafif dilation;
+    /// sonuç 0 (yazı adayı) / 255 (zemin) değerli bir tampondur.</summary>
+    private static byte[] AdaptiveThreshold(byte[] gray, int w, int h)
+    {
         // Integral image: pencere ortalamasını O(1)'de hesaplamak için.
         var integral = new long[(w + 1) * (h + 1)];
         for (int y = 0; y < h; y++)
@@ -470,15 +572,7 @@ public sealed class FullScanOcr : IDisposable
             binary[y * w + x] = gray[y * w + x] < mean * (1 - t) ? (byte)0 : (byte)255;
         }
 
-        var dilated = Dilate(binary, w, h, radius: 1);
-
-        var outBitmap = new SKBitmap(new SKImageInfo(w, h));
-        i = 0;
-        for (int y = 0; y < h; y++)
-        for (int x = 0; x < w; x++, i++)
-            outBitmap.SetPixel(x, y, dilated[i] == 0 ? SKColors.Black : SKColors.White);
-
-        return outBitmap;
+        return Dilate(binary, w, h, radius: 1);
     }
 
     /// <summary>Binary görüntüde koyu (0) pikselleri komşularına yayar — dekoratif
@@ -506,19 +600,41 @@ public sealed class FullScanOcr : IDisposable
         return result;
     }
 
-    private static string SavePng(SKBitmap bitmap)
-    {
-        var tmp = Path.Combine(Path.GetTempPath(), $"scan_{Guid.NewGuid():N}.png");
-        using var img = SKImage.FromBitmap(bitmap);
-        using var data = img.Encode(SKEncodedImageFormat.Png, 100);
-        using var fs = File.OpenWrite(tmp);
-        data.SaveTo(fs);
-        return tmp;
-    }
-
     public void Dispose()
     {
         _engine.Dispose();
         _digitsEngine.Dispose();
+    }
+}
+
+/// <summary>Sabit boyutlu FullScanOcr havuzu. TesseractEngine thread-safe DEĞİLDİR; paralel
+/// görsel taraması, her biri aynı anda tek iş parçacığınca kullanılan bağımsız motor örnekleri
+/// gerektirir. Motor kurulumu pahalı olduğu için örnekler bir kez (başlangıçta) oluşturulur;
+/// Run() bir örneği ödünç alır, iş bitince havuza geri koyar.</summary>
+public sealed class FullScanOcrPool : IDisposable
+{
+    private readonly BlockingCollection<FullScanOcr> _pool = [];
+
+    public int Size { get; }
+
+    public FullScanOcrPool(string tessdataPath, string candidatePattern, int size)
+    {
+        Size = Math.Max(1, size);
+        for (int i = 0; i < Size; i++)
+            _pool.Add(new FullScanOcr(tessdataPath, candidatePattern));
+    }
+
+    public T Run<T>(Func<FullScanOcr, T> work)
+    {
+        var ocr = _pool.Take();
+        try { return work(ocr); }
+        finally { _pool.Add(ocr); }
+    }
+
+    public void Dispose()
+    {
+        // BlockingCollection'ın enumerator'ı tüketmeyen bir anlık görüntü döner.
+        foreach (var ocr in _pool) ocr.Dispose();
+        _pool.Dispose();
     }
 }

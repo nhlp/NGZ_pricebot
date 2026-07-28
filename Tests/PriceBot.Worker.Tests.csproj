@@ -16,6 +16,7 @@
 
   <ItemGroup>
     <Compile Include="..\ExcelPriceReader.cs" />
+    <Compile Include="..\BrandMatcher.cs" />
   </ItemGroup>
 
 </Project>
