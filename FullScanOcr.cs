@@ -253,16 +253,23 @@ public sealed class FullScanOcr : IDisposable
     /// <summary>Kod, "code:317613" gibi bitişik bir önekle aynı token içinde gelebilir;
     /// tüm token yerine regex'in eşleştiği alt dizi aday olarak alınır. Ayrıca her token'ın
     /// harf/rakam-karışıklığı düzeltilmiş hâli de denenir (örn. "134S" -> "1345"), çünkü tek
-    /// bir yanlış-okunan karakter regex'in tüm token'ı reddetmesine yol açar.</summary>
+    /// bir yanlış-okunan karakter regex'in tüm token'ı reddetmesine yol açar. Tire ile ayrılmış
+    /// beden/yaş aralığı token'ları ("134-140-146-152", "2-3-4-5", "0-12-18-24") tamamen elenir —
+    /// üretim vakası (2026-08-03): bu tür rakam listeleri hem Excel'in YAŞ/BEDEN sütununda hem
+    /// görselin üzerinde basılı beden tablosunda aynı rakamlarla göründüğü için kod adayı
+    /// sanılabiliyordu (gerçek örnek: "0-12-18-24" tire kaybolunca "0121824" olarak birleşip
+    /// rastgele bir Excel koduna denk gelme riski taşıyordu).</summary>
     private Dictionary<string, float> ExtractCandidates(Dictionary<string, float> tokens)
     {
         var extracted = new Dictionary<string, float>();
         foreach (var (word, conf) in tokens)
         {
+            if (SizeOrAgeRangeToken.IsMatch(word)) continue;
+
             TryExtract(word, conf, extracted);
 
             var normalized = Normalize(word);
-            if (normalized != word)
+            if (normalized != word && !SizeOrAgeRangeToken.IsMatch(normalized))
                 TryExtract(normalized, conf * 0.95f, extracted);
         }
         return extracted;

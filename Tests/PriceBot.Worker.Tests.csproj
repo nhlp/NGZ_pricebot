@@ -5,10 +5,17 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
+    <!-- NPOI, test projesinde SADECE .xls fixture'ları yazmak için kullanılıyor (üretim kodu
+         NPOI'ye bağımlı değil, sadece okuma için ExcelDataReader kullanıyor). -->
+    <AcceptNPOIOSMFLicense>true</AcceptNPOIOSMFLicense>
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="ExcelDataReader" Version="3.9.0" />
+    <PackageReference Include="ExcelDataReader.DataSet" Version="3.9.0" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="NPOI" Version="2.8.0" />
+    <PackageReference Include="System.Text.Encoding.CodePages" Version="10.0.10" />
     <PackageReference Include="xunit" Version="2.9.2" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
     <PackageReference Include="ClosedXML" Version="0.104.2" />

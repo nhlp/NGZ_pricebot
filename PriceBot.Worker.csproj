@@ -11,6 +11,8 @@
 
   <ItemGroup>
     <PackageReference Include="ClosedXML" Version="0.104.2" />
+    <PackageReference Include="ExcelDataReader" Version="3.9.0" />
+    <PackageReference Include="ExcelDataReader.DataSet" Version="3.9.0" />
     <PackageReference Include="Microsoft.Data.SqlClient" Version="5.2.2" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.0" />
     <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="8.0.0" />
@@ -19,6 +21,7 @@
     <PackageReference Include="Serilog.Sinks.File" Version="5.0.0" />
     <PackageReference Include="Serilog.Sinks.EventLog" Version="3.1.0" />
     <PackageReference Include="SkiaSharp" Version="2.88.8" />
+    <PackageReference Include="System.Text.Encoding.CodePages" Version="10.0.10" />
     <PackageReference Include="Tesseract" Version="5.2.0" />
   </ItemGroup>
 
