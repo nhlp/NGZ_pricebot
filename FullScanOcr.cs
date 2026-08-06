@@ -128,7 +128,11 @@ public sealed class FullScanOcr : IDisposable
         _candidate = new Regex(candidatePattern, RegexOptions.Compiled);
     }
 
-    public ScanResult FindProductCodes(string imagePath, IReadOnlySet<string> excelCodes)
+    /// <param name="descriptions">v11: kod -> Excel satırındaki diğer hücrelerin ham metni
+    /// (bkz. ExcelPriceReader.CodeColumnCandidate.Descriptions). Opsiyonel — verilmezse (null)
+    /// yaş-aralığı çapraz doğrulaması hiç denenmez, davranış v10'dan farksız kalır.</param>
+    public ScanResult FindProductCodes(string imagePath, IReadOnlySet<string> excelCodes,
+        IReadOnlyDictionary<string, string>? descriptions = null)
     {
         using var src = SKBitmap.Decode(imagePath)
             ?? throw new InvalidDataException($"Görsel açılamadı: {imagePath}");
@@ -204,9 +208,56 @@ public sealed class FullScanOcr : IDisposable
         unmatchedCodes.ExceptWith(matches.Select(m => m.Code));
         if (unmatchedCodes.Count > 0 && candidates.Count > 0)
         {
-            var fuzzy = TryFuzzyMatch(candidates, extracted, unmatchedCodes, matches);
-            if (fuzzy is not null)
-                matches.Add(fuzzy);
+            var fuzzyCandidates = ComputeFuzzyCandidates(candidates, extracted, unmatchedCodes, matches);
+            if (fuzzyCandidates.Count == 1)
+            {
+                var only = fuzzyCandidates.First();
+                matches.Add(new CodeMatch(only.Key, only.Value.Conf * 0.6f, IsFuzzy: true));
+            }
+            else if (fuzzyCandidates.Count > 1 && descriptions is not null)
+            {
+                // v11 (2026-08-06, Cuento sınır-vaka takibi): v10'un sayısal-yakınlık daraltması
+                // ardışık kod bloklarının SINIRINDA hâlâ simetrik kalabiliyordu (ör. 4224 vs 4227 —
+                // ikisi de zaten eşleşmiş 4225/4226'ya eşit mesafede). İLK denenen "sadece yaş-
+                // aralığı eşleşsin" fikri TEK BAŞINA yetersiz çıktı: aynı katalogda çok sayıda
+                // FARKLI ürün ailesi aynı standart yaş dilimlerini ("2-5 yaş", "6-9 yaş", "10-13
+                // yaş") paylaşıyor — 4224 VE 4227 ikisi de "2-5 yaş" ile eşleşiyor, sadece stil
+                // metni farklı ("düşük kol patlı" vs "parçalı biyeli"). Asıl ayırt edici sinyal
+                // AİLE: aynı ürün ailesinin 3 farklı yaş-grubu satırı, açıklama metninde yaş
+                // aralığı DIŞINDAKİ kısımda birebir aynıdır. Bu yüzden iki koşul birden aranır:
+                // (1) adayın açıklamasındaki yaş aralığı, görselde OKUNAN aralıklardan biriyle
+                // eşleşmeli, VE (2) adayın yaş-aralığı çıkarılmış "stil metni", bu görselde ZATEN
+                // kesin eşleşmiş kod(lar)ın stil metniyle birebir aynı olmalı (aynı aile kanıtı).
+                // İkisi birden sadece TEK bir adayı işaret ediyorsa kabul edilir. Gerçek vaka
+                // doğrulaması: 4224/4227/4228/4229 hepsi (1)'i geçiyor ama sadece 4224 (2)'yi de
+                // geçiyor (4225/4226 ile aynı "flam pamuk düşük kol patlı" ailesi) -> doğru kod.
+                // Zıt örnek (4191 vs 4193, anchor 4192): ikisi de HEM yaş-aralığı eşleşiyor HEM
+                // aynı aile stil metnine sahip (üçü de aynı ürünün 3 yaş grubu) -> gerçekten
+                // ayırt edilemez, iki aday da kalır, doğru şekilde reddedilir (yanlış tahmin yok).
+                var ageRanges = ExtractAgeRanges(tokens);
+                if (ageRanges.Count > 0)
+                {
+                    var anchorStyles = matches
+                        .Select(m => descriptions.TryGetValue(m.Code, out var d) ? StyleTextWithoutAgeRange(d) : null)
+                        .Where(s => !string.IsNullOrEmpty(s))
+                        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+                    var resolved = fuzzyCandidates.Keys
+                        .Where(code => descriptions.TryGetValue(code, out var desc)
+                            && ExtractAgeRangeFromDescription(desc) is { } descRange
+                            && ageRanges.Any(r => r.Min == descRange.Min && r.Max == descRange.Max)
+                            && anchorStyles.Contains(StyleTextWithoutAgeRange(desc)))
+                        .ToList();
+                    if (resolved.Count == 1)
+                    {
+                        var code = resolved[0];
+                        var conf = fuzzyCandidates[code].Conf;
+                        // Üçlü çıkarım (fuzzy mesafe + yaş-aralığı + aile stil metni) olduğu için
+                        // v10'un 0.6 katsayısından biraz daha ihtiyatlı bir güven skoru kullanılır.
+                        matches.Add(new CodeMatch(code, conf * 0.55f, IsFuzzy: true));
+                    }
+                }
+            }
         }
 
         return new ScanResult(matches, candidates, tokens);
@@ -335,14 +386,21 @@ public sealed class FullScanOcr : IDisposable
     /// vakayı çözmez — 4224 ile 4227 ikisi de aynı mesafede (4225'in bir ucu, 4226'nın bir ucu)
     /// olduğu için ardışık iki üç'lü grup sınırında hâlâ simetrik bir belirsizlik kalabilir; bunu
     /// kesin çözmek için görselin okuduğu yaş aralığı metnini ("2.3.4.5" vb.) Excel'in ürün
-    /// açıklamasıyla çapraz doğrulamak gerekir (ayrı bir iyileştirme, henüz yapılmadı). Kesin
-    /// eşleşme yoksa (anchor yok — görsel tamamen fuzzy'ye dayanıyorsa) eski (tüm evren) davranış
-    /// korunur; hiçbir bağlam sinyali olmadan taramayı daraltmak temelsiz olurdu. Bu değişiklik
-    /// sadece evreni KÜÇÜLTÜR (asla büyütmez), bu yüzden önceden reddedilen bir belirsizlik hâlâ
-    /// belirsizse (örn. 4224/4227 ikilisi) yine reddedilir — yanlış koda atama riski artmaz.</summary>
+    /// açıklamasıyla çapraz doğrulamak gerekir — bkz. v11 (ComputeFuzzyCandidates artık TEK bir
+    /// karar vermek yerine TÜM yarışan adayları döner, çağıran taraf v11 tie-break'i dener).
+    /// Kesin eşleşme yoksa (anchor yok — görsel tamamen fuzzy'ye dayanıyorsa) eski (tüm evren)
+    /// davranış korunur; hiçbir bağlam sinyali olmadan taramayı daraltmak temelsiz olurdu. Bu
+    /// değişiklik sadece evreni KÜÇÜLTÜR (asla büyütmez), bu yüzden önceden reddedilen bir
+    /// belirsizlik hâlâ belirsizse yine reddedilir — yanlış koda atama riski artmaz.</summary>
     private const int NearbyAnchorDelta = 3;
 
-    private static CodeMatch? TryFuzzyMatch(List<string> candidates, Dictionary<string, float> extracted,
+    /// <summary>v9/v10'daki TryFuzzyMatch'in devamı: artık TEK bir CodeMatch? değil, yarışan TÜM
+    /// (kod -> en iyi aday) eşleşmelerini döner. Çağıran taraf (FindProductCodes) Count==1 ise
+    /// doğrudan kabul eder; Count&gt;1 ise (v11) yaş-aralığı çapraz doğrulamasıyla belirsizliği
+    /// kırmayı dener, o da başarısız olursa hiçbiri kabul edilmez. Mantığın kendisi (skor eşiği,
+    /// mesafe, anchor-daraltma) v10'dan değişmedi.</summary>
+    private static Dictionary<string, (float Conf, string Candidate)> ComputeFuzzyCandidates(
+        List<string> candidates, Dictionary<string, float> extracted,
         IReadOnlySet<string> excelCodes, IReadOnlyList<CodeMatch> alreadyMatchedOnThisImage)
     {
         var anchors = alreadyMatchedOnThisImage
@@ -374,11 +432,66 @@ public sealed class FullScanOcr : IDisposable
             }
         }
 
-        if (found.Count != 1) return null; // 0: hiç aday yok, >1: belirsiz -> ikisinde de reddet
-
-        var only = found.First();
-        return new CodeMatch(only.Key, only.Value.Conf * 0.6f, IsFuzzy: true);
+        return found; // 0: hiç aday yok, 1: tek/kesin, >1: belirsiz -> çağıran taraf karar verir
     }
+
+    /// <summary>v11: görselin üzerinde OKUNAN yaş/beden aralığı metinlerini ("2.3.4.5 years",
+    /// "6.7.8.9 years" gibi — Cuento tarzı etiketlerde nokta ile ayrılmış, TİRE ile ayrılmışsa
+    /// zaten SizeOrAgeRangeToken tarafından kod adayı çıkarımından elenip burada da kullanılabilir)
+    /// (Min,Max) çiftleri olarak çıkarır. SizeOrAgeRangeToken'ın aksine bu bir FİLTRE değil,
+    /// POZİTİF bir sinyaldir — ComputeFuzzyCandidates'ın belirsiz bıraktığı adaylar arasından
+    /// Excel açıklamasıyla eşleşeni bulmak için kullanılır (bkz. FindProductCodes v11 notu).
+    /// Güven eşiği var: bu çapraz-doğrulama son bir "tie-break" sinyali olduğu için düşük güvenli
+    /// gürültü token'larının yanlış aralık üretmesi istenmez.</summary>
+    private const float AgeRangeMinConfidence = 50f;
+    private static readonly Regex AgeRangeToken = new(@"^\d{1,2}([.\-]\d{1,2}){1,}$", RegexOptions.Compiled);
+
+    private static List<(int Min, int Max)> ExtractAgeRanges(Dictionary<string, float> tokens)
+    {
+        var ranges = new List<(int Min, int Max)>();
+        foreach (var (word, conf) in tokens)
+        {
+            if (conf < AgeRangeMinConfidence) continue;
+            if (!AgeRangeToken.IsMatch(word)) continue;
+
+            var parts = word.Split(['.', '-'], StringSplitOptions.RemoveEmptyEntries);
+            var numbers = new List<int>(parts.Length);
+            bool allValid = true;
+            foreach (var part in parts)
+            {
+                if (!int.TryParse(part, out var n) || n is < 0 or > 99) { allValid = false; break; }
+                numbers.Add(n);
+            }
+            if (!allValid || numbers.Count < 2) continue;
+
+            ranges.Add((numbers.Min(), numbers.Max()));
+        }
+        return ranges;
+    }
+
+    /// <summary>Excel'in kod/fiyat dışındaki hücrelerinden (bkz. ExcelPriceReader.Descriptions)
+    /// "2-5 yaş", "6-9 yas" gibi bir yaş/beden aralığı ifadesi ararsa (Min,Max) döner. Aralık
+    /// ayracı sadece TİRE kabul edilir (Excel'de serbest metin, nokta ayraçlı yazım beklenmez —
+    /// o sadece görsel üzerindeki dekoratif OCR okuması için geçerli).</summary>
+    private static readonly Regex DescriptionAgeRange =
+        new(@"(\d{1,2})\s*-\s*(\d{1,2})\s*(yaş|yas|age)", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    private static (int Min, int Max)? ExtractAgeRangeFromDescription(string description)
+    {
+        var m = DescriptionAgeRange.Match(description);
+        if (!m.Success) return null;
+        if (!int.TryParse(m.Groups[1].Value, out var a) || !int.TryParse(m.Groups[2].Value, out var b)) return null;
+        return (Math.Min(a, b), Math.Max(a, b));
+    }
+
+    /// <summary>Açıklama metninden yaş-aralığı ifadesini ("2-5 yaş" vb.) çıkarıp geri kalanı
+    /// döner — aynı ürün ailesinin farklı yaş-grubu satırları (ör. "2-5 yaş flam pamuk düşük kol
+    /// patlı" / "6-9 yaş flam pamuk düşük kol patlı" / "10-13 yaş flam pamuk düşük kol patlı")
+    /// bu işlemden sonra BİREBİR aynı metne ("FLAM PAMUK DÜŞÜK KOL PATLI") indirgenir. Bu,
+    /// aynı yaş dilimini paylaşan ama FARKLI bir ürünü temsil eden satırlardan ("2-5 yaş flam
+    /// pamuk parçalı biyeli") ayırt etmek için kullanılır (bkz. FindProductCodes v11 notu).</summary>
+    private static string StyleTextWithoutAgeRange(string description) =>
+        DescriptionAgeRange.Replace(description, "").Trim().ToUpperInvariant();
 
     private static int LevenshteinDistance(string a, string b)
     {

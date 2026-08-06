@@ -28,7 +28,8 @@ public sealed record CodeColumnCandidate(
     int ColumnNumber,
     int HeaderPriority,
     Dictionary<string, decimal> Prices,
-    List<(int Row, string Code, string RawPrice)> SkippedRows);
+    List<(int Row, string Code, string RawPrice)> SkippedRows,
+    Dictionary<string, string> Descriptions);
 
 public class ExcelPriceReader
 {
@@ -222,6 +223,7 @@ public class ExcelPriceReader
             if (LooksLikeSizeOrAgeColumn(rows, headerRow.RowNumber, col)) continue;
 
             var prices = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+            var descriptions = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             var skippedRows = new List<(int Row, string Code, string RawPrice)>();
 
             foreach (var row in rows.Where(r => r.RowNumber > headerRow.RowNumber))
@@ -240,6 +242,21 @@ public class ExcelPriceReader
                     {
                         skippedRows.Add((row.RowNumber, productCode, priceRaw));
                     }
+
+                    // Kod/fiyat dışındaki hücreler (ör. "Malın Cinsi", "Ürün Adı" gibi serbest-
+                    // metin sütunlar) birleştirilip saklanır — hangi sütunun "açıklama" olduğunu
+                    // başlıktan tahmin etmeye çalışmak yerine (kırılgan, layout'a göre değişir),
+                    // FullScanOcr'daki yaş-aralığı/aile-stili çapraz doğrulaması için satırın
+                    // serbest metnini kullanmak yeterli ve daha sağlam (bkz. FullScanOcr v11).
+                    // SADECE RAKAMDAN oluşan hücreler (Sıra No, Miktar gibi) dışlanır — bunlar
+                    // satırdan satıra değişen gürültüdür ve aynı ürün ailesinin farklı yaş-grubu
+                    // satırlarının "yaş aralığı hariç" birebir aynı metne indirgenmesini bozar.
+                    var otherCells = row.Cells
+                        .Where(c => c.Key != col && c.Key != priceCol)
+                        .OrderBy(c => c.Key)
+                        .Select(c => c.Value)
+                        .Where(v => !string.IsNullOrWhiteSpace(v) && v.Any(ch => !char.IsDigit(ch)));
+                    descriptions[productCode] = string.Join(" | ", otherCells);
                 }
                 catch
                 {
@@ -248,7 +265,7 @@ public class ExcelPriceReader
             }
 
             if (prices.Count > 0)
-                result.Add(new CodeColumnCandidate(name, col, priority, prices, skippedRows));
+                result.Add(new CodeColumnCandidate(name, col, priority, prices, skippedRows, descriptions));
         }
 
         return result;

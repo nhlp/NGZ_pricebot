@@ -170,6 +170,16 @@ public class Worker : BackgroundService
                     var excelCodesUnion = new HashSet<string>(
                         codeColumnCandidates.SelectMany(c => c.Prices.Keys), StringComparer.OrdinalIgnoreCase);
 
+                    // v11: kod -> Excel satırının diğer hücrelerinin ham metni (ör. "Malın Cinsi").
+                    // FullScanOcr, çoklu-kod görsellerde fuzzy kurtarma belirsiz kaldığında (ör.
+                    // ardışık kod bloklarının sınırında, 4224 vs 4227 gibi) görselin okuduğu yaş/
+                    // beden aralığını bu metinle çapraz doğrulamak için kullanır. Hangi aday sütun
+                    // kazanırsa kazansın aynı Excel satırından geldiği için birleşim güvenli.
+                    var descriptionsUnion = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var col in codeColumnCandidates)
+                        foreach (var (code, desc) in col.Descriptions)
+                            descriptionsUnion[code] = desc;
+
                     var rate = await rateProvider.GetUsdRateAsync(DateTime.Today);
                     if (rate is null)
                     {
@@ -228,7 +238,7 @@ public class Worker : BackgroundService
                     Parallel.For(0, allFiles.Count, parallelOptions, i =>
                     {
                         var imageTimer = Stopwatch.StartNew();
-                        scanResults[i] = ocrPool.Run(o => o.FindProductCodes(allFiles[i], excelCodesUnion));
+                        scanResults[i] = ocrPool.Run(o => o.FindProductCodes(allFiles[i], excelCodesUnion, descriptionsUnion));
                         _logger.LogInformation("OCR: {File} -> {Matches} eşleşme, {Candidates} aday ({Elapsed:N1} sn)",
                             Path.GetFileName(allFiles[i]), scanResults[i].Matches.Count, scanResults[i].Candidates.Count,
                             imageTimer.Elapsed.TotalSeconds);

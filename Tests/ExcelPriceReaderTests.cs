@@ -419,6 +419,44 @@ public class ExcelPriceReaderTests
         }
         finally { File.Delete(path); }
     }
+
+    /// <summary>v11 (2026-08-06): Descriptions, kod/fiyat dışındaki serbest-metin hücrelerini
+    /// (ör. "Malın Cinsi") birleştirip saklar — FullScanOcr'ın yaş-aralığı/aile-stili çapraz
+    /// doğrulaması bunu kullanır. SADECE RAKAMDAN oluşan hücreler ("Sıra No", "Miktar") hariç
+    /// tutulmalı — aksi halde aynı ürün ailesinin farklı yaş-grubu satırları (yaş aralığı hariç
+    /// birebir aynı olması gereken) sıra numarası gibi satırdan satıra değişen gürültü yüzünden
+    /// hiçbir zaman eşleşmez (gerçek vaka: Cuento 4224/4225/4226).</summary>
+    [Fact]
+    public void LoadCandidateCodeColumns_Descriptions_SadeceMetinHucreleriBirlesirRakamHariçTutulur()
+    {
+        using var wb = new XLWorkbook();
+        var ws = wb.Worksheets.Add("Fiyat Listesi");
+        ws.Cell(1, 1).Value = "Sıra No";
+        ws.Cell(1, 2).Value = "Stok Kodu";
+        ws.Cell(1, 3).Value = "Malın Cinsi";
+        ws.Cell(1, 4).Value = "Fiyatı";
+        ws.Cell(1, 5).Value = "Miktar";
+
+        ws.Cell(2, 1).Value = 20;
+        ws.Cell(2, 2).Value = "4224";
+        ws.Cell(2, 3).Value = "2-5 yaş flam pamuk düşük kol patlı";
+        ws.Cell(2, 4).Value = 295.00m;
+        ws.Cell(2, 5).Value = 0;
+
+        var path = Path.Combine(Path.GetTempPath(), $"pricebot_test_{Guid.NewGuid():N}.xlsx");
+        wb.SaveAs(path);
+        try
+        {
+            var candidates = ExcelPriceReader.LoadCandidateCodeColumns(path);
+
+            var stokKodu = Assert.Single(candidates);
+            Assert.True(stokKodu.Descriptions.TryGetValue("4224", out var desc));
+            Assert.Equal("2-5 yaş flam pamuk düşük kol patlı", desc);
+            Assert.DoesNotContain("20", desc);
+            Assert.DoesNotContain(" 0", desc);
+        }
+        finally { File.Delete(path); }
+    }
 }
 
 /// <summary>ClosedXML sadece OOXML (.xlsx/.xlsm, ZIP tabanlı) formatını açabilir; eski .xls (BIFF,
