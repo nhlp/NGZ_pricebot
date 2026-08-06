@@ -209,12 +209,12 @@ public sealed class FullScanOcr : IDisposable
         if (unmatchedCodes.Count > 0 && candidates.Count > 0)
         {
             var fuzzyCandidates = ComputeFuzzyCandidates(candidates, extracted, unmatchedCodes, matches);
-            if (fuzzyCandidates.Count == 1)
+            if (fuzzyCandidates.Count == 1 && !fuzzyCandidates.First().Value.SelfReferential)
             {
                 var only = fuzzyCandidates.First();
                 matches.Add(new CodeMatch(only.Key, only.Value.Conf * 0.6f, IsFuzzy: true));
             }
-            else if (fuzzyCandidates.Count > 1 && descriptions is not null)
+            else if (fuzzyCandidates.Count > 0 && descriptions is not null)
             {
                 // v11 (2026-08-06, Cuento sınır-vaka takibi): v10'un sayısal-yakınlık daraltması
                 // ardışık kod bloklarının SINIRINDA hâlâ simetrik kalabiliyordu (ör. 4224 vs 4227 —
@@ -395,11 +395,21 @@ public sealed class FullScanOcr : IDisposable
     private const int NearbyAnchorDelta = 3;
 
     /// <summary>v9/v10'daki TryFuzzyMatch'in devamı: artık TEK bir CodeMatch? değil, yarışan TÜM
-    /// (kod -> en iyi aday) eşleşmelerini döner. Çağıran taraf (FindProductCodes) Count==1 ise
-    /// doğrudan kabul eder; Count&gt;1 ise (v11) yaş-aralığı çapraz doğrulamasıyla belirsizliği
-    /// kırmayı dener, o da başarısız olursa hiçbiri kabul edilmez. Mantığın kendisi (skor eşiği,
-    /// mesafe, anchor-daraltma) v10'dan değişmedi.</summary>
-    private static Dictionary<string, (float Conf, string Candidate)> ComputeFuzzyCandidates(
+    /// (kod -> en iyi aday) eşleşmelerini döner. Çağıran taraf (FindProductCodes) Count==1 VE
+    /// kazanan aday "self-referential" DEĞİLSE doğrudan kabul eder; aksi halde (Count&gt;1 veya
+    /// self-referential) v11 yaş-aralığı/aile-stili çapraz doğrulamasıyla belirsizliği kırmayı
+    /// dener, o da başarısız olursa hiçbiri kabul edilmez.</summary>
+    /// <remarks>SelfReferential (v10.1, 2026-08-06, ERAY KIDS testinde bulundu): kazanan adayın
+    /// METNİ, bu görselde ZATEN kesin eşleşmiş bir kodun kendisiyle birebir aynıysa true. Ham
+    /// dışlama yerine (o zaman Cuento 4224 düzeltmesi de kırılıyordu — 4224'ün TEK kanıtı, zaten
+    /// eşleşmiş "4225" adayıydı) bu bir bayrak: kazanan kanıt, doğru okunan bir kodun sırf sayısal
+    /// komşusu olduğu için "kanıt" sayılmışsa (herhangi iki ardışık tam sayı için Levenshtein
+    /// mesafesi her zaman 1'dir — "6541" vs "6542"), bu TEK BAŞINA yeterli değildir; ek bir bağımsız
+    /// sinyal (v11) doğrulamadan kabul edilmemeli. Gerçek vaka: tek-ürünlü "6541, 3-4-5-6 years"
+    /// etiketinde hiç var olmayan "6542" sırf "6541" adayı yüzünden fuzzy ekleniyordu; Cuento'da ise
+    /// aynı mekanizma (4225'in kendisi 4224 için "kanıt") v11 ile doğrulanınca DOĞRU çıkıyor. Yani
+    /// ayrım ham mesafede değil, v11'in bağımsız yaş-aralığı+aile-stili kanıtında.</remarks>
+    private static Dictionary<string, (float Conf, string Candidate, bool SelfReferential)> ComputeFuzzyCandidates(
         List<string> candidates, Dictionary<string, float> extracted,
         IReadOnlySet<string> excelCodes, IReadOnlyList<CodeMatch> alreadyMatchedOnThisImage)
     {
@@ -417,7 +427,10 @@ public sealed class FullScanOcr : IDisposable
                 .Where(code => long.TryParse(code, out var n) && anchors.Any(a => Math.Abs(a - n) <= NearbyAnchorDelta))
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-        var found = new Dictionary<string, (float Conf, string Candidate)>();
+        var alreadyMatchedCodes = new HashSet<string>(
+            alreadyMatchedOnThisImage.Select(m => m.Code), StringComparer.OrdinalIgnoreCase);
+
+        var found = new Dictionary<string, (float Conf, string Candidate, bool SelfReferential)>();
 
         foreach (var code in scope)
         {
@@ -427,8 +440,9 @@ public sealed class FullScanOcr : IDisposable
                 if (Math.Abs(candidate.Length - code.Length) > 1) continue;
                 if (LevenshteinDistance(candidate, code) != 1) continue;
 
+                bool selfRef = alreadyMatchedCodes.Contains(candidate);
                 if (!found.TryGetValue(code, out var existing) || extracted[candidate] > existing.Conf)
-                    found[code] = (extracted[candidate], candidate);
+                    found[code] = (extracted[candidate], candidate, selfRef);
             }
         }
 
