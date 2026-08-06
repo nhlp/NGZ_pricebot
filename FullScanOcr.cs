@@ -68,6 +68,23 @@
 //      marka taramasında (CollectBrandTokens) hiç çalışmaz — saf rakam token'ları marka
 //      eşleştirmesinde kullanılamaz (BrandMatcher rakam→harf düzeltmesini yalnızca
 //      harf+rakam KARIŞIK kelimelere uygular, bkz. BrandMatcher.cs).
+//
+// v9 (çoklu-kod eksik damgalama düzeltmesi, 2026-08-03): tüm ara-geçiş erken-çıkışları
+// ("matches.Count == 0" ise devam et) TEK kod bulmanın yeterli olduğu varsayımıyla
+// yazılmıştı. PriceStamper'ın çoklu-kod damgalaması (bkz. commit c998e90) eklenince bu
+// varsayım geçersiz kaldı: aynı görselde birden fazla kod (yaş/beden grubu) meşru olabilir
+// ve ilk (ucuz) geçiş bunlardan sadece bir kısmını okuyabilir — "matches.Count > 0" olunca
+// pipeline durduğu için kalan kod(lar) hiç aranmadan atlanıyordu (gerçek vaka: Cuento
+// 3-yaş-grubu etiketleri, 3 koddan sadece 1-2'si damgalandı). Düzeltme: (1) iki UCUZ
+// tam-görsel geçiş (global kontrast germe + yerel adaptif eşikleme) artık ilk eşleşmede
+// durmadan HER ZAMAN ikisi de çalışıp token biriktiriyor; (2) fuzzy son çare artık "hiç
+// eşleşme yoksa" değil, görselde BAŞKA kod(lar) zaten exact eşleşmiş olsa bile HENÜZ
+// eşleşmemiş Excel kodları için çalışıyor. Daha pahalı kurtarma geçişleri (kenar-şerit,
+// gri-dilim — dekoratif/bubble fontlar için) bilinçli olarak "hiç eşleşme yoksa" gated
+// bırakıldı; koşulsuz çalıştırmak v8'in çözdüğü OCR performans sorununu geri getirir. Yani
+// aynı görselde hem kolay hem de gerçekten zor (dekoratif font gerektiren) bir kod varsa bu
+// kalan senaryo teorik olarak hâlâ mümkündür — pratikte görülürse aynı yaklaşım o geçişlere
+// de uygulanabilir.
 namespace PriceBotPipeline;
 
 using System.Collections.Concurrent;
@@ -116,21 +133,21 @@ public sealed class FullScanOcr : IDisposable
         using var src = SKBitmap.Decode(imagePath)
             ?? throw new InvalidDataException($"Görsel açılamadı: {imagePath}");
 
+        // v9: aynı görselde birden fazla ürün kodu meşru olabilir (yaş/beden grupları, bkz.
+        // PriceStamper'ın çoklu-kod damgalaması) ve her kod farklı netlikte basılmış olabilir —
+        // biri ilk geçişte kolayca okunurken diğeri hafifçe daha düşük kontrastlı/küçük olabilir.
+        // Bu yüzden iki UCUZ tam-görsel geçiş (global kontrast germe + yerel adaptif eşikleme)
+        // artık ilk eşleşme bulunduğunda durmuyor, ikisi de HER ZAMAN çalışıp token biriktiriyor
+        // — üretim vakası (2026-08-03, Cuento 3-yaş-grubu etiketleri): ilk geçiş 3 koddan
+        // sadece 1-2'sini okuyunca "eşleşme var" denip ikinci geçiş hiç denenmeden diğer
+        // kod(lar) atlanıyordu. Daha PAHALI kurtarma geçişleri (kenar-şerit/gri-dilim, aşağıda)
+        // bilinçli olarak "hiç eşleşme yoksa" gated bırakıldı — koşulsuz çalıştırmak her
+        // görselin OCR süresini belirgin artırır (v8'in çözdüğü performans sorununu geri getirir).
         var tokens = CollectTokens(Preprocess(src), excelCodes);
+        MergeTokens(tokens, CollectTokens(PreprocessAdaptive(src), excelCodes));
+
         var extracted = ExtractCandidates(tokens);
         var matches = MatchExact(extracted, excelCodes);
-
-        if (matches.Count == 0)
-        {
-            // İkinci deneme: yerel adaptif eşikleme + çizgi-köprüleme. Sadece
-            // ilk (global kontrast germeli) geçiş hiçbir Excel koduyla exact
-            // eşleşmediğinde çalışır — düşük yerel kontrastlı / kesik-çizgili
-            // dekoratif fontları kurtarmak için.
-            MergeTokens(tokens, CollectTokens(PreprocessAdaptive(src), excelCodes));
-
-            extracted = ExtractCandidates(tokens);
-            matches = MatchExact(extracted, excelCodes);
-        }
 
         if (matches.Count == 0)
         {
@@ -178,11 +195,16 @@ public sealed class FullScanOcr : IDisposable
 
         var candidates = extracted.Keys.ToList();
 
-        // Son çare: exact match yoksa, Excel'deki bilinen kodları OCR adaylarında
-        // 1 karakter farkla ara. Sadece tek ve belirsiz olmayan bir sonuç varsa kabul et.
-        if (matches.Count == 0 && candidates.Count > 0)
+        // Son çare: Excel'deki HENÜZ eşleşmemiş kodları OCR adaylarında 1 karakter farkla ara.
+        // v9: artık sadece "hiç exact eşleşme yoksa" değil, görselde BAŞKA bir kod zaten exact
+        // eşleşmiş olsa bile çalışır — aksi halde aynı görseldeki, OCR'ın 1 haneyi yanlış
+        // okuduğu diğer kod(lar) için fuzzy kurtarma hiç denenmiyordu (bkz. yukarıdaki v9 notu).
+        // Zaten bulunan kodları arama kümesinden çıkarmak fuzzy'nin belirsizlik riskini de azaltır.
+        var unmatchedCodes = new HashSet<string>(excelCodes, StringComparer.OrdinalIgnoreCase);
+        unmatchedCodes.ExceptWith(matches.Select(m => m.Code));
+        if (unmatchedCodes.Count > 0 && candidates.Count > 0)
         {
-            var fuzzy = TryFuzzyMatch(candidates, extracted, excelCodes);
+            var fuzzy = TryFuzzyMatch(candidates, extracted, unmatchedCodes, matches);
             if (fuzzy is not null)
                 matches.Add(fuzzy);
         }
@@ -301,11 +323,45 @@ public sealed class FullScanOcr : IDisposable
     /// gelir; bu eşik onları etkilemez.</summary>
     private const float FuzzyMinConfidence = 40f;
 
-    private static CodeMatch? TryFuzzyMatch(List<string> candidates, Dictionary<string, float> extracted, IReadOnlySet<string> excelCodes)
+    /// <summary>v10 (2026-08-05, Cuento çoklu-yaş-grubu vakası): belirsizlik kontrolü artık TÜM
+    /// Excel kod evreni yerine, bu görselde ZATEN kesin eşleşmiş kod(lar)a sayıca YAKIN kodlarla
+    /// sınırlı taranır. Gerçek vaka: 4224/4225/4226 üç-yaş-grubu etiketinde 4225 ve 4226 kesin
+    /// okunuyor, 4224 sadece "4225" adayının 1-hane-yanlış-okunmuş hâli olarak kurtarılabilirdi —
+    /// ama Cuento'nun kod aralığı ardışık olduğu için (4224-4229 bandında art arda ürünler var)
+    /// aynı "4225" adayı 4224/4227/4228/4229'un HEPSİNE 1 mesafede düşüyor, TÜM evrende belirsiz
+    /// sayılıp hepsi reddediliyordu. Bu görselin ZATEN bulduğu 4225/4226'ya yakın kodlarla
+    /// sınırlamak, uzak/alakasız kodların (görselde asla geçmeyen, başka bir üründen gelen
+    /// "gürültü" eşleşmeleri) belirsizliğe katkısını keser. NOT: bu sınırlama tek başına HER
+    /// vakayı çözmez — 4224 ile 4227 ikisi de aynı mesafede (4225'in bir ucu, 4226'nın bir ucu)
+    /// olduğu için ardışık iki üç'lü grup sınırında hâlâ simetrik bir belirsizlik kalabilir; bunu
+    /// kesin çözmek için görselin okuduğu yaş aralığı metnini ("2.3.4.5" vb.) Excel'in ürün
+    /// açıklamasıyla çapraz doğrulamak gerekir (ayrı bir iyileştirme, henüz yapılmadı). Kesin
+    /// eşleşme yoksa (anchor yok — görsel tamamen fuzzy'ye dayanıyorsa) eski (tüm evren) davranış
+    /// korunur; hiçbir bağlam sinyali olmadan taramayı daraltmak temelsiz olurdu. Bu değişiklik
+    /// sadece evreni KÜÇÜLTÜR (asla büyütmez), bu yüzden önceden reddedilen bir belirsizlik hâlâ
+    /// belirsizse (örn. 4224/4227 ikilisi) yine reddedilir — yanlış koda atama riski artmaz.</summary>
+    private const int NearbyAnchorDelta = 3;
+
+    private static CodeMatch? TryFuzzyMatch(List<string> candidates, Dictionary<string, float> extracted,
+        IReadOnlySet<string> excelCodes, IReadOnlyList<CodeMatch> alreadyMatchedOnThisImage)
     {
+        var anchors = alreadyMatchedOnThisImage
+            .Select(m => long.TryParse(m.Code, out var n) ? (long?)n : null)
+            .Where(n => n.HasValue)
+            .Select(n => n!.Value)
+            .ToList();
+
+        // Anchor yoksa (bu görselde hiç kesin eşleşme yok) daraltma için hiçbir bağlam sinyali
+        // yok — eski, tüm evreni tarayan davranış korunur.
+        var scope = anchors.Count == 0
+            ? excelCodes
+            : excelCodes
+                .Where(code => long.TryParse(code, out var n) && anchors.Any(a => Math.Abs(a - n) <= NearbyAnchorDelta))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
         var found = new Dictionary<string, (float Conf, string Candidate)>();
 
-        foreach (var code in excelCodes)
+        foreach (var code in scope)
         {
             foreach (var candidate in candidates)
             {
