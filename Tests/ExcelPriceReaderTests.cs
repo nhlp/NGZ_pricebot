@@ -420,6 +420,91 @@ public class ExcelPriceReaderTests
         finally { File.Delete(path); }
     }
 
+    /// <summary>Üretim vakası (DECO KİDS, 2026-08-07): ürün kodlarının kendisi "26-158", "27-958"
+    /// gibi TEK-tireli "NN-NNN" biçiminde. Bu şekil "98-104" gibi gerçek bir tek-tireli beden
+    /// aralığıyla BİREBİR aynı görünüyor (SizeOrAgeRangeToken ayırt edemez), ama başlık açıkça
+    /// "KOD" diyorsa (öncelik 2, en güvenilir sinyal) sütun ARTIK elenmemeli — eski davranışta
+    /// KOD sütunu tamamen elenip geriye ÜRÜN ADI kalıyor, 65/65 görsel eşleşmiyordu.</summary>
+    [Fact]
+    public void LoadCandidateCodeColumns_TekTireliStilKoduAcikKodBasligiyla_AdayKalir()
+    {
+        using var wb = new XLWorkbook();
+        var ws = wb.Worksheets.Add("Fiyat Listesi");
+        ws.Cell(1, 1).Value = "KOD";
+        ws.Cell(1, 2).Value = "ÜRÜN ADI";
+        ws.Cell(1, 3).Value = "YAŞ";
+        ws.Cell(1, 4).Value = "FİYAT";
+
+        var rows = new[]
+        {
+            ("26-158", "MİKİ BASKILI ERKEK İNTERLOK TAKIM", "06-18 AY", 179.95m),
+            ("26-165", "BASKILI WAFFLE ERKEK TAKIM", "06-18 AY", 156.95m),
+            ("26-178", "BASKILI CEPLİ İNTERLOK EKEK TAKIM", "09-24 AY", 223.45m),
+        };
+        for (int i = 0; i < rows.Length; i++)
+        {
+            var (kod, ad, yas, fiyat) = rows[i];
+            ws.Cell(i + 2, 1).Value = kod;
+            ws.Cell(i + 2, 2).Value = ad;
+            ws.Cell(i + 2, 3).Value = yas;
+            ws.Cell(i + 2, 4).Value = fiyat;
+        }
+
+        var path = Path.Combine(Path.GetTempPath(), $"pricebot_test_{Guid.NewGuid():N}.xlsx");
+        wb.SaveAs(path);
+        try
+        {
+            var candidates = ExcelPriceReader.LoadCandidateCodeColumns(path);
+
+            // YAŞ, başlık kelimesiyle zaten elenir; KOD (öncelik 2) ve ÜRÜN ADI (öncelik 1, "ürün"
+            // içeriyor) ikisi de aday kalır — asıl regresyon testi, eski hatanın (KOD'un yanlışlıkla
+            // elenip geriye SADECE ÜRÜN ADI kalması) artık olmadığını doğrulamak.
+            var kodColumn = Assert.Single(candidates, c => c.HeaderName == "KOD");
+            Assert.Equal(2, kodColumn.HeaderPriority);
+            Assert.Equal(3, kodColumn.Prices.Count);
+            Assert.True(kodColumn.Prices.ContainsKey("26-158"));
+            Assert.Equal(179.95m, kodColumn.Prices["26-158"]);
+
+            // Nihai (tek-sütunlu) seçici de KOD'u (öncelik 2), ÜRÜN ADI'nı (öncelik 1) DEĞİL
+            // seçmeli — LoadPricesFromExcel gerçek Worker akışının (tek-aday geriye dönük uyumluluk
+            // sarmalayıcısı) kullandığı yol.
+            var prices = ExcelPriceReader.LoadPricesFromExcel(path);
+            Assert.True(prices.ContainsKey("26-158"));
+            Assert.False(prices.ContainsKey("MİKİ BASKILI ERKEK İNTERLOK TAKIM"));
+        }
+        finally { File.Delete(path); }
+    }
+
+    /// <summary>Aynı tek-tireli "NN-NNN" şekli, başlık ZAYIF/belirsiz olduğunda (örn. "ÜRÜN ADI"
+    /// gibi asıl kod sütunu değil, başlıksız-tablo senaryosunda öncelik 0/1) eski güvenlik-öncelikli
+    /// davranış korunmalı: şekil belirsizken başlık güçlü bir sinyal vermiyorsa yine elenir. Bu,
+    /// bir önceki testle birlikte "başlık hakemdir, ama sadece güçlüyse" kuralını iki yönden de
+    /// doğrular.</summary>
+    [Fact]
+    public void LoadCandidateCodeColumns_TekTireliDegerZayifBasliklaEleniyor()
+    {
+        using var wb = new XLWorkbook();
+        var ws = wb.Worksheets.Add("Fiyat Listesi");
+        ws.Cell(1, 1).Value = "ÜRÜN"; // "ürün" -> öncelik 1 (zayıf/belirsiz), "kod" değil
+        ws.Cell(1, 2).Value = "FİYAT";
+
+        var ranges = new[] { "98-104", "104-110", "110-116" };
+        for (int i = 0; i < ranges.Length; i++)
+        {
+            ws.Cell(i + 2, 1).Value = ranges[i];
+            ws.Cell(i + 2, 2).Value = 100m + i;
+        }
+
+        var path = Path.Combine(Path.GetTempPath(), $"pricebot_test_{Guid.NewGuid():N}.xlsx");
+        wb.SaveAs(path);
+        try
+        {
+            var candidates = ExcelPriceReader.LoadCandidateCodeColumns(path);
+            Assert.Empty(candidates);
+        }
+        finally { File.Delete(path); }
+    }
+
     /// <summary>v11 (2026-08-06): Descriptions, kod/fiyat dışındaki serbest-metin hücrelerini
     /// (ör. "Malın Cinsi") birleştirip saklar — FullScanOcr'ın yaş-aralığı/aile-stili çapraz
     /// doğrulaması bunu kullanır. SADECE RAKAMDAN oluşan hücreler ("Sıra No", "Miktar") hariç

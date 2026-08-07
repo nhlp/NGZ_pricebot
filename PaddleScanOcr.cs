@@ -64,18 +64,34 @@ public sealed class PaddleScanOcr : IOcrEngine
     /// 10) ile örnek başına saklanan, görülen HER farklı girdi boyutu için ayrı derlenmiş kernel
     /// grafiği bu 6 örnek boyunca katlanarak birikiyor — CPU %0 olsa bile bellek geri verilmiyor (klasik
     /// "idle ama elde tutulan native bellek" imzası). Düzeltme: `cpuMathThreadCount: 1` (paralellik zaten
-    /// consumerCount'un adanmış thread'leriyle sağlanıyor, örnek içi çoklu iş parçacığına gerek yok),
-    /// `cacheCapacity: 4` (örnek başına saklanan kernel grafiği sayısını sınırlar) ve
-    /// `Detector.MaxSize: 1600` (WhatsApp'tan gelen orijinal boyuttaki büyük fotoğrafların algılama
-    /// modeline sınırsız boyutta girip her seferinde farklı/devasa tensör şekilleri için yeni kernel
-    /// derlemesi + bellek ayırması tetiklemesini önler — PriceStamper'ın kendi 1600px sınırıyla tutarlı).</summary>
+    /// consumerCount'un adanmış thread'leriyle sağlanıyor, örnek içi çoklu iş parçacığına gerek yok — bu
+    /// asıl oversubscription'ı tek başına giderir) ve `Detector.MaxSize: 1600` (WhatsApp'tan gelen
+    /// orijinal boyuttaki büyük fotoğrafların algılama modeline sınırsız boyutta girip her seferinde
+    /// farklı/devasa tensör şekilleri için yeni kernel derlemesi + bellek ayırması tetiklemesini önler —
+    /// PriceStamper'ın kendi 1600px sınırıyla tutarlı; bu ayrıca gerçek bir HIZ kazancıdır, algılama daha
+    /// küçük tensörle çalışır).
+    ///
+    /// HIZ NOTU (2026-08-07): `cacheCapacity` (örnek başına saklanan, görülen her farklı girdi tensör
+    /// şekli için derlenmiş kernel grafiği sayısı) ilk bellek düzeltmesinde 4'e kısılmıştı — ama asıl
+    /// oversubscription'ın nedeni thread sayısıydı, cache'in payı görece küçüktü. Çok düşük bir
+    /// cacheCapacity, klasördeki görseller farklı çözünürlüklerdeyse her yeni boyutta oneDNN'in kernel'i
+    /// YENİDEN DERLEMESİNE yol açar (genelde asıl OCR hesabından bile pahalı) — bu yüzden 8'e çıkarıldı
+    /// (orijinal varsayılan 10'un altında, oversubscription düzeltildiği için güvenli, ama daha az
+    /// cache-miss/yeniden derleme).
+    ///
+    /// HIZ DENEMESİ (2026-08-07, kullanıcı onayıyla): `Enable180Classification: false` — algılanan HER
+    /// metin kutusu için ayrı bir "180° döndürülmüş mü?" sınıflandırma modeli geçişini atlar (kutu
+    /// sayısıyla orantılı gerçek bir hız kazancı). Risk: bir görsel gerçekten baş aşağı gelirse o
+    /// metin ters okunur/okunamaz — ürün fotoğrafları WhatsApp'tan geldiği için teorik olarak mümkün.
+    /// Kullanıcı riski kabul ederek denemeyi istedi; gerçek klasörlerle kod okuma oranı DÜŞERSE
+    /// (özellikle ters/yan çekilmiş fotoğraflarda kod kaçırma artarsa) true'ya geri alınmalı.</summary>
     public PaddleScanOcr(FullOcrModel model, string candidatePattern, int consumerCount)
     {
         _queue = new QueuedPaddleOcrAll(
-            () => new PaddleOcrAll(model, PaddleDevice.Mkldnn(cacheCapacity: 4, cpuMathThreadCount: 1))
+            () => new PaddleOcrAll(model, PaddleDevice.Mkldnn(cacheCapacity: 8, cpuMathThreadCount: 1))
             {
                 AllowRotateDetection = true,
-                Enable180Classification = true,
+                Enable180Classification = false,
                 Detector = { MaxSize = 1600 },
             },
             consumerCount: consumerCount);
@@ -167,22 +183,53 @@ public sealed class PaddleScanOcr : IOcrEngine
         return tokens;
     }
 
-    // ---- Aşağısı FullScanOcr.cs (Tesseract) ile birebir aynı, motor bağımsız mantık ----
+    // ---- Aşağısı motor-bağımsız aday çıkarma/eşleştirme mantığı (eski FullScanOcr.cs'in
+    // Tesseract kaldırıldıktan sonra hayatta kalan kısmı, bkz. IOcrEngine.cs dosya başı notu) ----
 
     private Dictionary<string, float> ExtractCandidates(Dictionary<string, float> tokens)
     {
         var extracted = new Dictionary<string, float>();
         foreach (var (word, conf) in tokens)
         {
+            // Tire'li token'ın kendisi ("26-158", "98-104" gibi) HER ZAMAN ayrı bir aday olarak
+            // denenir — aşağıdaki SizeOrAgeRangeToken filtresinden bilinçli olarak ETKİLENMEZ
+            // (bkz. TryExtractHyphen yorumu).
+            TryExtractHyphen(word, conf, extracted);
+
+            // Beden/yaş listesi ("134-140-146-152", "98-104" gibi) SAF RAKAM alt-dizisi
+            // çıkarımına asla girmez (2026-08-03 vakası: "98-104" -> "104" gibi tesadüfi bir
+            // rakam dizisi başka bir ürün koduyla yanlışlıkla eşleşebiliyordu).
             if (SizeOrAgeRangeToken.IsMatch(word)) continue;
 
             TryExtract(word, conf, extracted);
 
             var normalized = Normalize(word);
-            if (normalized != word && !SizeOrAgeRangeToken.IsMatch(normalized))
-                TryExtract(normalized, conf * 0.95f, extracted);
+            if (normalized != word)
+            {
+                TryExtractHyphen(normalized, conf * 0.95f, extracted);
+                if (!SizeOrAgeRangeToken.IsMatch(normalized))
+                    TryExtract(normalized, conf * 0.95f, extracted);
+            }
         }
         return extracted;
+    }
+
+    /// <summary>Tire'li stil-numarası kodları ("26-158", "27-958" gibi — DECO KİDS vakası,
+    /// 2026-08-07) için ek bir aday deseni. `_candidate` (appsettings'ten gelen `\d{3,7}`) tireyi
+    /// asla eşleştirmez, ama Excel'deki kod aynen tire ile saklanıyorsa (ExcelPriceReader kodu
+    /// olduğu gibi anahtarlar) saf rakam alt dizisi ("958") o kodla asla tam string eşitliği
+    /// sağlayamaz. Bilinçli olarak SizeOrAgeRangeToken filtresinin (ExtractCandidates'taki
+    /// "beden/yaş listesi" `continue`) DIŞINDA, HER token için çalıştırılır: "98-104" (gerçek
+    /// beden aralığı) ile "26-158" (gerçek ürün kodu) AYNI şekle sahiptir, şekilden ayırt
+    /// edilemez — MatchExact'ın Excel'e karşı tam-eşitlik kontrolü nihai hakemdir, burada risk
+    /// (Excel'de GERÇEKTEN o tire'li değerde bir kod olması gerekir) zaten ihmal edilebilir.</summary>
+    private static readonly Regex HyphenCandidate = new(@"\d{1,4}-\d{1,4}", RegexOptions.Compiled);
+
+    private static void TryExtractHyphen(string word, float conf, Dictionary<string, float> extracted)
+    {
+        var m = HyphenCandidate.Match(word);
+        if (m.Success && (!extracted.TryGetValue(m.Value, out var best) || conf > best))
+            extracted[m.Value] = conf;
     }
 
     private void TryExtract(string word, float conf, Dictionary<string, float> extracted)
