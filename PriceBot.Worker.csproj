@@ -22,13 +22,18 @@
     <PackageReference Include="Serilog.Sinks.EventLog" Version="3.1.0" />
     <PackageReference Include="SkiaSharp" Version="2.88.8" />
     <PackageReference Include="System.Text.Encoding.CodePages" Version="10.0.10" />
-    <PackageReference Include="Tesseract" Version="5.2.0" />
     <!-- PaddleOCR (2026-08-07, spike sonucu Spike/PaddleOcrProbe): Tesseract'a göre çok daha
-         temiz/hızlı okuma (bkz. CLAUDE.md "OCR performansı" notu ve spike raporu). appsettings.json
-         "OcrEngine" alanı "Tesseract" yapılıp servis yeniden başlatılırsa eski motora dönülür —
-         bu paketler kalsa da zararsızdır. Sdcb.PaddleOCR.Models.Local, kullanılmayan V3/V5 model
-         ağırlıklarını da (toplam ~500MB) yanında getirir; daha küçük bir publish için tek başına
-         Sdcb.PaddleOCR.Models.LocalV4 + Shared'a geçilebilir (şimdilik basitlik tercih edildi). -->
+         temiz/hızlı okuma (bkz. CLAUDE.md "OCR performansı" notu ve spike raporu). Tesseract
+         (FullScanOcr.cs) 2026-08-07'de kaldırıldı — geri dönmek gerekirse git tag
+         checkpoint/dual-ocr-engines, ikisinin birlikte olduğu son durumu işaretler.
+         Sdcb.PaddleOCR.Models.Local, sadece kullanılan LocalFullModels.EnglishV4 dışında V3/V5
+         model ağırlıklarını da (toplam ~500MB) yanında getiriyor. Bunu LocalV4+Shared'a
+         bölmeyi denedik: split paketlerin ham API'si (KnownModels.All) LocalFullModels gibi
+         isimli bir "EnglishV4" üyesi sunmuyor ve V3/V5'i ExcludeAssets ile bastırmak, Local'ın
+         kendi static üyelerinin (ChineseV3 vb.) derleme zamanı bu assembly'lere bağımlı olması
+         yüzünden riskli (statik alan başlatma sırasında olası FileNotFoundException) — doğrulanmadan
+         üretime alınmadı. Meta-paket bilinçli olarak korundu; ileride PaddleSharp bu API'yi
+         netleştirirse tekrar denenebilir. -->
     <PackageReference Include="Sdcb.PaddleOCR" Version="3.0.1" />
     <PackageReference Include="Sdcb.PaddleInference.runtime.win64.mkl" Version="3.0.1" />
     <PackageReference Include="Sdcb.PaddleOCR.Models.Local" Version="3.0.1" />
@@ -36,7 +41,6 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Include="tessdata\**" CopyToOutputDirectory="PreserveNewest" />
     <None Include="appsettings.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 

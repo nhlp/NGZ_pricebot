@@ -64,9 +64,6 @@ public class Worker : BackgroundService
         var config = JsonNode.Parse(File.ReadAllText(Path.Combine(appDir, "appsettings.json")))!;
         var nebimConnectionString = config["ConnectionStrings"]!["Nebim"]!.GetValue<string>();
         var extraRecipients = config["ExtraRecipients"]?.AsArray().Select(n => n!.GetValue<string>()).ToList() ?? [];
-        // "Paddle" (varsayılan) veya "Tesseract" — bkz. OcrEngineFactory. Olumsuz geri dönüş
-        // olursa appsettings.json'da "Tesseract" yazıp servisi yeniden başlatmak yeterlidir.
-        var ocrEngineName = config["OcrEngine"]?.GetValue<string>() ?? "Paddle";
         // Test amaçlı: true iken islendi.txt raporunun (Gönderim bölümü çıkarılmış, "DAMGALANDI"
         // yerine müşteriye yönelik "ETİKETLİ" etiketiyle) bir kopyası gönderen numaraya WhatsApp
         // metni olarak da gönderilir. Yayına geçmeden önce appsettings.json'da false yapılmalı.
@@ -76,18 +73,17 @@ public class Worker : BackgroundService
         var rateProvider = new NebimRateProvider(nebimConnectionString, _logger);
         var brandProvider = new NebimBrandProvider(nebimConnectionString, _logger);
 
-        // TesseractEngine thread-safe değil; görseller, başlangıçta bir kez kurulan sabit
-        // boyutlu bir motor havuzuyla paralel taranır (motor kurulumu pahalı olduğu için
-        // görsel başına değil, servis ömrü boyunca aynı örnekler kullanılır). Bir çekirdek
-        // sistemin geri kalanına (bot, SQL) bırakılır; bellek için 6 örnekle sınırlanır.
+        // PaddleOcrAll'ın altındaki native motor thread-affinity gerektirdiği için görseller
+        // QueuedPaddleOcrAll'ın adanmış thread'leri üzerinden paralel taranır (bkz.
+        // PaddleScanOcr.cs). Motor kurulumu pahalı olduğu için görsel başına değil, servis
+        // ömrü boyunca aynı örnekler kullanılır. Bir çekirdek sistemin geri kalanına (bot, SQL)
+        // bırakılır; bellek için 6 örnekle sınırlanır (her örnek kendi başına tam model +
+        // scratchpad belleği taşıdığından — bkz. PaddleScanOcr.cs bellek notu).
         var ocrParallelism = Math.Clamp(Environment.ProcessorCount - 1, 1, 6);
-        // Alt sınır 3: bazı fiyat listeleri 3 haneli ürün kodu kullanıyor (gerçek vaka,
-        // BABY Hi 2026-08-03: "473" gibi kodlar 4 haneli varsayımıyla aday listesine hiç
-        // girmiyordu, Excel'de karşılığı olsa bile karşılaştırmaya ulaşamıyordu).
-        using var ocrPool = OcrEngineFactory.Create(ocrEngineName, Path.Combine(appDir, "tessdata"), ocrParallelism);
+        using var ocrPool = OcrEngineFactory.Create(ocrParallelism);
 
-        _logger.LogInformation("PriceBot Worker başladı. IncomingRoot={IncomingRoot} BotSendUrl={BotSendUrl} ExtraRecipients={ExtraRecipients} OcrEngine={OcrEngine} OcrParalel={OcrParallelism} SendReportToCustomer={SendReportToCustomer}",
-            IncomingRoot, BotSendUrl, extraRecipients.Count == 0 ? "(boş)" : string.Join(", ", extraRecipients), ocrEngineName, ocrParallelism, sendReportToCustomer);
+        _logger.LogInformation("PriceBot Worker başladı. IncomingRoot={IncomingRoot} BotSendUrl={BotSendUrl} ExtraRecipients={ExtraRecipients} OcrParalel={OcrParallelism} SendReportToCustomer={SendReportToCustomer}",
+            IncomingRoot, BotSendUrl, extraRecipients.Count == 0 ? "(boş)" : string.Join(", ", extraRecipients), ocrParallelism, sendReportToCustomer);
 
         while (!stoppingToken.IsCancellationRequested)
         {
