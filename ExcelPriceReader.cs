@@ -5,12 +5,20 @@ using ClosedXML.Excel;
 using ExcelDataReader;
 
 /// <summary>Tire ile ayrılmış rakam listelerini (beden/yaş/ay aralığı: "134-140-146-152",
-/// "2-3-4-5", "0-12-18-24") tespit eder. Bu değerler ürün kodu DEĞİLDİR, ama hem Excel'in
-/// YAŞ/BEDEN gibi sütunlarında hem de görsellerin üzerine basılı beden tablolarında AYNI
-/// rakamlar göründüğü için (2026-08-03 vakası), kod adayı çıkarımında (hem Excel sütunu seçiminde
-/// hem OCR aday çıkarımında) elenmeleri gerekir — aksi halde OCR'ın bir beden tablosundan okuduğu
-/// rastgele bir rakam dizisi, tesadüfen bir ürün koduyla veya yanlış bir Excel sütunuyla eşleşebilir.
-/// FullScanOcr.cs bu sınıfı (global namespace, using gerekmeden) doğrudan kullanır.</summary>
+/// "2-3-4-5", "0-12-18-24", ayrıca TEK-tireli iki-sayı bir "beden" çifti olan "98-104" gibi)
+/// tespit eder. Bu değerler ürün kodu DEĞİLDİR, ama hem Excel'in YAŞ/BEDEN gibi sütunlarında hem
+/// de görsellerin üzerine basılı beden tablolarında AYNI rakamlar göründüğü için (2026-08-03
+/// vakası), OCR aday çıkarımında SAF RAKAM alt-dizisi çıkarılmadan önce elenmeleri gerekir — aksi
+/// halde OCR'ın bir beden tablosundan okuduğu rastgele bir rakam dizisi ("98-104" -> "104"),
+/// tesadüfen bir ürün koduyla eşleşebilir. Bu dosyanın PaddleScanOcr.cs (eski FullScanOcr.cs)
+/// tarafından kullanımı: SADECE saf-rakam alt-dizisi çıkarımını (TryExtract) engeller — tire
+/// dahil ham token'ın kendisi hâlâ ayrı bir aday olarak denenir (bkz. PaddleScanOcr.TryExtract),
+/// çünkü DECO KİDS vakası (2026-08-07) TEK-tireli "26-158"/"27-958" biçiminde gerçek ürün
+/// kodları da olabildiğini gösterdi — "98-104" (gerçek beden aralığı) ile "26-158" (gerçek kod)
+/// AYNI şekle sahip, şekilden ayırt edilemezler; MatchExact'ın Excel'e karşı tam-eşitlik kontrolü
+/// nihai hakemdir. Excel sütunu seçiminde (ExcelPriceReader.LooksLikeSizeOrAgeColumn) de aynı
+/// belirsizlik var — orada başlık metni (açık "kod"/"sku"/"id") tek-tireli belirsiz çiftler için
+/// hakem olarak kullanılır, bkz. o fonksiyonun yorumu.</summary>
 internal static class SizeOrAgeRangeToken
 {
     private static readonly Regex Pattern = new(@"^\d{1,4}(-\d{1,4}){1,}$", RegexOptions.Compiled);
@@ -261,7 +269,7 @@ public class ExcelPriceReader
         var result = new List<CodeColumnCandidate>();
         foreach (var (col, name, priority) in codeColumnHeaders)
         {
-            if (LooksLikeSizeOrAgeColumn(rows, headerRow.RowNumber, col)) continue;
+            if (LooksLikeSizeOrAgeColumn(rows, headerRow.RowNumber, col, priority)) continue;
 
             var prices = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
             var descriptions = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -371,21 +379,41 @@ public class ExcelPriceReader
 
     /// <summary>Bir sütunun değerleri çoğunlukla tire ile ayrılmış rakam listesiyse (beden/yaş/ay
     /// aralığı) bu bir kod sütunu OLAMAZ, başlığı yanıltıcı biçimde "kod" içerse bile (kenar durumu,
-    /// ama ucuz bir güvenlik önlemi). İlk birkaç dolu hücre örneklenir, tamamını taramaya gerek yok.</summary>
-    private static bool LooksLikeSizeOrAgeColumn(List<GridRow> rows, int headerRowNumber, int col, int sampleSize = 15)
+    /// ama ucuz bir güvenlik önlemi) — YETER Kİ şekil KESİN olsun. İki alt-durum ayrılır:
+    /// (1) ÇOK-sayılı listeler (3+ sayı / 2+ tire, "134-140-146-152" gibi) hiçbir gerçek ürün
+    /// kodunda görülmez — başlık ne derse desin HER ZAMAN elenir.
+    /// (2) TEK-tireli iki-sayı çiftleri ("98-104" gibi) BELİRSİZDİR: hem gerçek bir beden aralığı
+    /// (cm) hem de "26-158"/"27-958" gibi gerçek bir stil-numarası ürün kodu (üretim vakası, DECO
+    /// KİDS 2026-08-07) AYNI şekle sahip olabilir — şekilden ayırt edilemez. Bu durumda başlık
+    /// hakemdir: açık "kod"/"sku"/"id" başlığı (<paramref name="headerPriority"/> == 2, en
+    /// güvenilir sinyal) varsa sütun elenmez; zayıf/belirsiz başlıkta (0/1) eski güvenlik-öncelikli
+    /// davranış korunur (elenir). İlk birkaç dolu hücre örneklenir, tamamını taramaya gerek yok.</summary>
+    private static readonly Regex MultiNumberRangePattern = new(@"^\d{1,4}(-\d{1,4}){2,}$", RegexOptions.Compiled);
+
+    private static bool LooksLikeSizeOrAgeColumn(List<GridRow> rows, int headerRowNumber, int col, int headerPriority, int sampleSize = 15)
     {
-        int total = 0, rangeLike = 0;
+        int total = 0, rangeLike = 0, multiNumber = 0;
         foreach (var row in rows.Where(r => r.RowNumber > headerRowNumber))
         {
             var val = row.Cell(col).Trim();
             if (string.IsNullOrEmpty(val)) continue;
 
             total++;
-            if (SizeOrAgeRangeToken.IsMatch(val)) rangeLike++;
+            if (SizeOrAgeRangeToken.IsMatch(val))
+            {
+                rangeLike++;
+                if (MultiNumberRangePattern.IsMatch(val)) multiNumber++;
+            }
             if (total >= sampleSize) break;
         }
 
-        return total > 0 && rangeLike * 2 >= total;
+        if (total == 0 || rangeLike * 2 < total) return false;
+
+        // Çoğunluk KESİN (3+ sayılı) bir liste değilse — yani belirsiz tek-tireli çiftlerden
+        // oluşuyorsa — ve başlık açıkça kod/sku/id diyorsa, başlık kazanır.
+        if (multiNumber * 2 < rangeLike && headerPriority >= 2) return false;
+
+        return true;
     }
 
     /// <summary>Bir fiyat sütunu adayının veri satırlarında en az bir sıfırdan farklı, geçerli
