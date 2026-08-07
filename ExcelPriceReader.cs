@@ -210,11 +210,52 @@ public class ExcelPriceReader
 
         if (headerRow is null)
         {
-            headerRow = rows.FirstOrDefault();
-            if (headerRow is null) return [];
-            int codeCol = headerRow.Cells.Keys.Min();
-            priceCol = codeCol + 1;
-            codeColumnHeaders = [(codeCol, headerRow.Cell(codeCol), 0)];
+            // Hiçbir satırda "kod"/"fiyat" gibi başlık metni yok — bazı listeler doğrudan veriyle
+            // başlıyor (gerçek vaka, 2026-08-07: sadece "MARKA FİYAT LİSTESİ" yazan dar bir
+            // başlık/banner satırı, asıl veri sonraki satırdan başlıyor ve DAHA FAZLA sütun
+            // kullanıyor). Eski "ilk kullanılan satır, en soldaki sütun kod" varsayımı bu durumda
+            // banner satırının dar sütun aralığı yüzünden yanlış sütunu (örn. açıklama) kod
+            // sanıyordu. Referans satır artık ilk birkaç satır arasında EN SIK görülen kullanılan-
+            // sütun-sayısına sahip olanı (asıl veri düzeni) — banner gibi tek seferlik satırlar
+            // elenir.
+            var sample = rows.Take(11).ToList();
+            var modeCount = sample
+                .GroupBy(r => r.Cells.Count)
+                .OrderByDescending(g => g.Count())
+                .ThenByDescending(g => g.Key)
+                .Select(g => (int?)g.Key)
+                .FirstOrDefault();
+            var anchorRow = (modeCount.HasValue ? sample.FirstOrDefault(r => r.Cells.Count == modeCount) : null)
+                ?? rows.FirstOrDefault();
+            if (anchorRow is null) return [];
+
+            // headerRow.RowNumber, "bu satırdan SONRAKİ satırlar veridir" sınırı olarak kullanılıyor
+            // (aşağıdaki paylaşılan döngü) — anchorRow genelde GERÇEK bir veri satırı olduğu için
+            // (banner satırı değil) kendisini dışarıda bırakmamak adına bir eksiği referans alınır.
+            headerRow = anchorRow with { RowNumber = anchorRow.RowNumber - 1 };
+
+            var usedCols = anchorRow.Cells.Keys.OrderBy(c => c).ToList();
+            int? priceGuess = DetectPriceColumn(rows, headerRow.RowNumber, usedCols);
+            priceCol = priceGuess ?? (usedCols.Count > 1 ? usedCols[^1] : usedCols[0] + 1);
+
+            // Fiyat sütunu dışında kalan ve "açıklama" gibi görünmeyen (kısa, boşluksuz değerli)
+            // her sütun bir kod ADAYI sayılır — hangisinin GERÇEK kod sütunu olduğuna, biraz
+            // aşağıda zaten var olan paylaşılan mekanizma (Worker.cs'in OCR oylaması) karar verir;
+            // burada sadece bariz metin/açıklama sütunları elenir (kullanıcı isteği, 2026-08-07:
+            // "görsellerde okunanların bulunduğu sütun kod olsun").
+            codeColumnHeaders = usedCols
+                .Where(c => c != priceCol && LooksLikeCodeColumn(rows, headerRow.RowNumber, c))
+                .Select(c => (c, $"[{c}]. sütun (başlıksız)", 0))
+                .ToList();
+
+            if (codeColumnHeaders.Count == 0)
+            {
+                // Son çare: hiçbir sütun makul bir kod adayı gibi görünmüyorsa (ör. tablo gerçekten
+                // tek sütunluysa) eski davranışa dön — sessizce boş dönmek yerine.
+                int codeCol = usedCols.Min();
+                priceCol = codeCol + 1;
+                codeColumnHeaders = [(codeCol, headerRow.Cell(codeCol), 0)];
+            }
         }
 
         var result = new List<CodeColumnCandidate>();
@@ -269,6 +310,63 @@ public class ExcelPriceReader
         }
 
         return result;
+    }
+
+    /// <summary>Başlıksız tabloda fiyat sütununu değer BİÇİMİNE bakarak tahmin eder (kullanıcı
+    /// isteği, 2026-08-07): virgül/nokta ondalık ayırıcılı değerler ("204,25", "218.50") en güçlü
+    /// sinyaldir — ürün kodları neredeyse hiç ondalık içermez, fiyatlar sıkça içerir. Hiçbir aday
+    /// sütun ondalık içermiyorsa (ör. tüm fiyatlar tam sayı, "325" gibi — testFOt1 vakası), en
+    /// SAĞDAKİ çoğunlukla-sayısal sütun fiyat kabul edilir (yaygın tablo kuralı: fiyat genelde en
+    /// sonda). Hiçbir sütun çoğunlukla sayısal değilse null döner (çağıran taraf kendi son çare
+    /// mantığına düşer).</summary>
+    private static int? DetectPriceColumn(List<GridRow> rows, int headerRowNumber, IReadOnlyList<int> candidateCols, int sampleSize = 20)
+    {
+        int? bestDecimalCol = null;
+        int bestDecimalCount = 0;
+        var numericCols = new List<int>();
+
+        foreach (var col in candidateCols)
+        {
+            int sampled = 0, numeric = 0, decimalLike = 0;
+            foreach (var row in rows.Where(r => r.RowNumber > headerRowNumber))
+            {
+                var val = row.Cell(col).Trim();
+                if (string.IsNullOrEmpty(val)) continue;
+
+                sampled++;
+                if (TryParsePrice(val, out _)) numeric++;
+                if (Regex.IsMatch(val, @"\d[.,]\d")) decimalLike++;
+                if (sampled >= sampleSize) break;
+            }
+            if (sampled == 0 || numeric * 2 < sampled) continue; // çoğunluk sayısal değilse aday değil
+
+            numericCols.Add(col);
+            if (decimalLike > bestDecimalCount) { bestDecimalCount = decimalLike; bestDecimalCol = col; }
+        }
+
+        if (bestDecimalCol is not null) return bestDecimalCol;
+        return numericCols.Count > 0 ? numericCols.Max() : null;
+    }
+
+    /// <summary>Başlıksız kod adayı filtresi: değerleri çoğunlukla KISA (&lt;=20 karakter) ve
+    /// BOŞLUKSUZ olan sütunlar (ör. "3263", "AB-102") kod adayı sayılır; "ERKEK 3 LÜ TAKIM..." gibi
+    /// boşluklu serbest metin sütunlar (açıklama) burada elenir. Kesin bir karar DEĞİLDİR —
+    /// Worker.cs'teki OCR oylaması asıl hakemdir (bkz. LoadCandidateCodeColumns çağıranı); bu
+    /// sadece bariz metin sütunlarını adaylıktan düşürüp oylamaya gereksiz gürültü taşımayı önler.</summary>
+    private static bool LooksLikeCodeColumn(List<GridRow> rows, int headerRowNumber, int col, int sampleSize = 15)
+    {
+        int total = 0, plausible = 0;
+        foreach (var row in rows.Where(r => r.RowNumber > headerRowNumber))
+        {
+            var val = row.Cell(col).Trim();
+            if (string.IsNullOrEmpty(val)) continue;
+
+            total++;
+            if (val.Length <= 20 && !val.Contains(' ')) plausible++;
+            if (total >= sampleSize) break;
+        }
+
+        return total > 0 && plausible * 2 >= total;
     }
 
     /// <summary>Bir sütunun değerleri çoğunlukla tire ile ayrılmış rakam listesiyse (beden/yaş/ay

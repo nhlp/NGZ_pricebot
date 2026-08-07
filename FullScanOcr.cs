@@ -102,7 +102,7 @@ public sealed record CodeMatch(string Code, float Confidence, bool IsFuzzy = fal
 /// için marka logosu (okunabildiyse) bu havuzda bulunur.</summary>
 public sealed record ScanResult(List<CodeMatch> Matches, List<string> Candidates, Dictionary<string, float> Tokens);
 
-public sealed class FullScanOcr : IDisposable
+public sealed class FullScanOcr : IOcrEngine
 {
     private readonly TesseractEngine _engine;
     private readonly TesseractEngine _digitsEngine;

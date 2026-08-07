@@ -23,6 +23,16 @@
     <PackageReference Include="SkiaSharp" Version="2.88.8" />
     <PackageReference Include="System.Text.Encoding.CodePages" Version="10.0.10" />
     <PackageReference Include="Tesseract" Version="5.2.0" />
+    <!-- PaddleOCR (2026-08-07, spike sonucu Spike/PaddleOcrProbe): Tesseract'a göre çok daha
+         temiz/hızlı okuma (bkz. CLAUDE.md "OCR performansı" notu ve spike raporu). appsettings.json
+         "OcrEngine" alanı "Tesseract" yapılıp servis yeniden başlatılırsa eski motora dönülür —
+         bu paketler kalsa da zararsızdır. Sdcb.PaddleOCR.Models.Local, kullanılmayan V3/V5 model
+         ağırlıklarını da (toplam ~500MB) yanında getirir; daha küçük bir publish için tek başına
+         Sdcb.PaddleOCR.Models.LocalV4 + Shared'a geçilebilir (şimdilik basitlik tercih edildi). -->
+    <PackageReference Include="Sdcb.PaddleOCR" Version="3.0.1" />
+    <PackageReference Include="Sdcb.PaddleInference.runtime.win64.mkl" Version="3.0.1" />
+    <PackageReference Include="Sdcb.PaddleOCR.Models.Local" Version="3.0.1" />
+    <PackageReference Include="OpenCvSharp4.runtime.win" Version="4.13.0.20260627" />
   </ItemGroup>
 
   <ItemGroup>
@@ -36,6 +46,12 @@
     <Compile Remove="Tests\**" />
     <None Remove="Tests\**" />
     <EmbeddedResource Remove="Tests\**" />
+    <!-- Spike\ PaddleOCR karşılaştırma denemesi (bkz. Spike/PaddleOcrProbe) kendi ayrı .csproj'una
+         sahip ve ana kaynaktan kopyalanmış dosyalar (FullScanOcr.cs, ExcelPriceReader.cs) içeriyor —
+         glob'un bunları ikinci kez derlemesini engelle (aksi halde CS0111 çakışması olur). -->
+    <Compile Remove="Spike\**" />
+    <None Remove="Spike\**" />
+    <EmbeddedResource Remove="Spike\**" />
   </ItemGroup>
 
 </Project>

@@ -10,6 +10,12 @@ namespace PriceBotPipeline;
 public class Worker : BackgroundService
 {
     private const string IncomingRoot = @"C:\PriceBot\Incoming";
+    /// <summary>Tamamlanmış (islendi.txt yazılmış VE gonderim_bekleyen.json'u kalmamış) Gonderim
+    /// klasörlerinin taşındığı arşiv kökü (2026-08-06). IncomingRoot aylar içinde sınırsız
+    /// birikiyordu ve her 10 sn'lik tarama SearchOption.AllDirectories ile TÜM geçmişi (Islenmis/
+    /// alt klasörleri dahil) yeniden dolaştığı için tur süresi zamanla doğrusal büyüyordu —
+    /// bkz. ArchiveIfComplete. Telefon alt klasör yapısı korunur: Archive\<telefon>\<Gonderim_...>.</summary>
+    private const string ArchiveRoot = @"C:\PriceBot\Archive";
     //private const string BotSendUrl = "http://localhost:3978/api/whatsapp/internal/send"; // Bot portu 3978'e eşitlendi!
     private const string BotSendUrl =  "https://asistyazilim.pakabulut.com:2304/api/whatsapp/internal/send";
     private static readonly HashSet<string> SupportedExtensions =
@@ -58,6 +64,13 @@ public class Worker : BackgroundService
         var config = JsonNode.Parse(File.ReadAllText(Path.Combine(appDir, "appsettings.json")))!;
         var nebimConnectionString = config["ConnectionStrings"]!["Nebim"]!.GetValue<string>();
         var extraRecipients = config["ExtraRecipients"]?.AsArray().Select(n => n!.GetValue<string>()).ToList() ?? [];
+        // "Paddle" (varsayılan) veya "Tesseract" — bkz. OcrEngineFactory. Olumsuz geri dönüş
+        // olursa appsettings.json'da "Tesseract" yazıp servisi yeniden başlatmak yeterlidir.
+        var ocrEngineName = config["OcrEngine"]?.GetValue<string>() ?? "Paddle";
+        // Test amaçlı: true iken islendi.txt raporunun (Gönderim bölümü çıkarılmış, "DAMGALANDI"
+        // yerine müşteriye yönelik "ETİKETLİ" etiketiyle) bir kopyası gönderen numaraya WhatsApp
+        // metni olarak da gönderilir. Yayına geçmeden önce appsettings.json'da false yapılmalı.
+        var sendReportToCustomer = config["SendReportToCustomer"]?.GetValue<bool>() ?? false;
 
         using var http = new HttpClient();
         var rateProvider = new NebimRateProvider(nebimConnectionString, _logger);
@@ -71,10 +84,10 @@ public class Worker : BackgroundService
         // Alt sınır 3: bazı fiyat listeleri 3 haneli ürün kodu kullanıyor (gerçek vaka,
         // BABY Hi 2026-08-03: "473" gibi kodlar 4 haneli varsayımıyla aday listesine hiç
         // girmiyordu, Excel'de karşılığı olsa bile karşılaştırmaya ulaşamıyordu).
-        using var ocrPool = new FullScanOcrPool(Path.Combine(appDir, "tessdata"), @"\d{3,7}", ocrParallelism);
+        using var ocrPool = OcrEngineFactory.Create(ocrEngineName, Path.Combine(appDir, "tessdata"), ocrParallelism);
 
-        _logger.LogInformation("PriceBot Worker başladı. IncomingRoot={IncomingRoot} BotSendUrl={BotSendUrl} ExtraRecipients={ExtraRecipients} OcrParalel={OcrParallelism}",
-            IncomingRoot, BotSendUrl, extraRecipients.Count == 0 ? "(boş)" : string.Join(", ", extraRecipients), ocrParallelism);
+        _logger.LogInformation("PriceBot Worker başladı. IncomingRoot={IncomingRoot} BotSendUrl={BotSendUrl} ExtraRecipients={ExtraRecipients} OcrEngine={OcrEngine} OcrParalel={OcrParallelism} SendReportToCustomer={SendReportToCustomer}",
+            IncomingRoot, BotSendUrl, extraRecipients.Count == 0 ? "(boş)" : string.Join(", ", extraRecipients), ocrEngineName, ocrParallelism, sendReportToCustomer);
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -219,6 +232,7 @@ public class Worker : BackgroundService
                             $"Zaman: {DateTime.Now:yyyy-MM-dd HH:mm:ss}{Environment.NewLine}" +
                             $"Bu klasörde desteklenen görsel bulunamadı (yalnızca Excel); işlem yapılmadı.{Environment.NewLine}",
                             Encoding.UTF8);
+                        ArchiveIfComplete(folder);
                         continue;
                     }
 
@@ -423,11 +437,30 @@ public class Worker : BackgroundService
                     // bot kapalıyken biten bir tur mesajı sessizce kaybetmez, ama zaten başarılı
                     // olmuş alıcılara ikinci kez göndermez.
                     File.WriteAllText(Path.Combine(folder, "islendi.txt"), report, Encoding.UTF8);
+
+                    if (sendReportToCustomer)
+                    {
+                        var customerReport = BuildCustomerFacingReport(report);
+                        var reportSend = await TrySendTextAsync(http, customerReport, senderPhone, stoppingToken);
+                        if (!reportSend.Success)
+                        {
+                            _logger.LogWarning("Rapor metni gönderilemedi: {Recipient} -> {StatusInfo} (test amaçlı özellik, gönderim/arşivleme akışını etkilemez)",
+                                senderPhone, reportSend.StatusInfo);
+                        }
+                    }
+
                     if (stillPending.Count > 0)
                     {
                         WritePendingSends(folder, stillPending);
                         _logger.LogWarning("{Count} gönderim başarısız oldu, klasör {Folder} için 'gonderim_bekleyen.json' yazıldı — bir sonraki turda sadece bu gönderimler tekrar denenecek.",
                             stillPending.Count, folder);
+                    }
+                    else
+                    {
+                        // Tüm gönderimler ilk turda başarılı oldu — gonderim_bekleyen.json hiç
+                        // yazılmadı, klasör hemen arşivlenebilir. stillPending.Count > 0 ise
+                        // arşivleme RetryPendingSendsAsync tarafındaki bekleyenler tükenince yapılır.
+                        ArchiveIfComplete(folder);
                     }
                     _logger.LogInformation("=== Tamamlandı: {Folder} — toplam {Total} görsel, {Stamped} damgalandı, {Skipped} atlandı, süre {Duration:N1} sn ===",
                         folder, allFiles.Count, stampedFiles.Count, imageResults.Count(r => !r.Matched), stopwatch.Elapsed.TotalSeconds);
@@ -468,7 +501,7 @@ public class Worker : BackgroundService
         string folder,
         string senderPhone,
         string excelName,
-        FullScanOcrPool ocrPool,
+        OcrEnginePool ocrPool,
         List<(string File, ScanResult Scan)> scans,
         List<BrandMultiplier> brandList,
         List<BrandMultiplier> excludedBrands,
@@ -573,8 +606,18 @@ public class Worker : BackgroundService
         // birden fazla soru düşebilir; kullanıcı hangi sorunun hangi listeye ait olduğunu kendi
         // gönderdiği dosyanın adından ayırt eder. Bot, cevabı her zaman en eski bekleyen klasöre
         // yazdığı için soruların ve cevapların sırası eşleşir (bkz. bot_marka_cevap_gorevi.md).
+        // Kesin/yaklaşık eşleşme yok, ama OCR token'ları listedeki bazı markalara yakın
+        // düşüyor olabilir (kesik/hatalı okuma) — kullanıcıya ilk soruda "tahmin" olarak
+        // sunulur, doğruysa bir tur (retry sorusu) atlanmış olur.
+        var firstGuesses = BrandMatcher.SuggestBrandsFromOcrTokens(unionTokens, brandList);
+        var guessText = firstGuesses.Count > 0
+            ? $" Şunlardan biri olabilir mi: {string.Join(", ", firstGuesses)}?"
+            : "";
         var question = "PriceBot: Gönderdiğiniz fotoğraflardaki ürünlerin markası otomatik tespit edilemedi " +
-                       $"('{excelName}' listesindeki ürünler). Lütfen markanın tam adını tek mesaj olarak yazınız (örnek: LİLAX).";
+                       $"('{excelName}' listesindeki ürünler).{guessText} Değilse markanın tam adını tek mesaj olarak yazınız (örnek: LİLAX).";
+        if (firstGuesses.Count > 0)
+            _logger.LogInformation("Klasör {Folder}: marka bulunamadı, ilk soruya OCR-yakınlık tahminleri eklendi: {Guesses}",
+                folder, string.Join(", ", firstGuesses));
         await SendBrandQuestionAsync(http, folder, senderPhone, questionPath, question, ct);
         return null;
     }
@@ -677,8 +720,45 @@ public class Worker : BackgroundService
             await Task.Delay(400, ct);
         }
 
-        if (stillPending.Count == 0) File.Delete(path);
+        if (stillPending.Count == 0)
+        {
+            File.Delete(path);
+            ArchiveIfComplete(folder);
+        }
         else WritePendingSends(folder, stillPending);
+    }
+
+    /// <summary>Klasör "tamamlanmış" ise (islendi.txt var VE gonderim_bekleyen.json yok — yani
+    /// hem OCR/damgalama hem de tüm gönderimler bitmiş) IncomingRoot dışına, ArchiveRoot altına
+    /// aynı telefon alt klasör yapısı korunarak taşır (bkz. ArchiveRoot yorumu). Taşıma başarısız
+    /// olursa (ör. dosya o an kilitliyse) klasör olduğu yerde kalır — işlevsel bir sorun değil,
+    /// islendi.txt zaten yeniden işlenmeyi engelliyor; sadece bir sonraki tarama biraz daha yavaş
+    /// olur. Bu metodun kendisi tarama yapmaz, sadece işi biten TEK bir klasörü taşır — çağıran,
+    /// bir klasörün işinin (gönderimler dahil) o an gerçekten bittiği noktalarda çağırmalı.</summary>
+    private void ArchiveIfComplete(string folder)
+    {
+        try
+        {
+            if (!File.Exists(Path.Combine(folder, "islendi.txt"))) return;
+            if (File.Exists(PendingSendsPath(folder))) return;
+
+            var phone = new DirectoryInfo(folder).Parent!.Name;
+            var target = Path.Combine(ArchiveRoot, phone, Path.GetFileName(folder));
+            if (Directory.Exists(target))
+            {
+                // Pratikte olmamalı (klasör adları GUID/zaman damgası içerir, _grupN son ekleri de
+                // orijinal ad üzerinden benzersizdir) ama sessiz veri kaybı yaşanmasın diye
+                // zaman damgalı bir yedek adla devam edilir.
+                target += $"_{DateTime.Now:yyyyMMdd_HHmmss}";
+            }
+            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+            Directory.Move(folder, target);
+            _logger.LogInformation("Klasör arşivlendi: {Folder} -> {Target}", folder, target);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Klasör {Folder} arşivlenemedi (IncomingRoot'ta kalacak, işlevsel bir sorun değil).", folder);
+        }
     }
 
     /// <summary>Birden fazla fiyat listesi (Excel) içeren bir gönderim klasörünü marka gruplarına böler
@@ -702,7 +782,7 @@ public class Worker : BackgroundService
     /// yalnız-Excel'li kalmış bir grup klasörünü de ana döngüdeki görselsiz-klasör koruması soru
     /// sormadan kapatır. Dosya taşıma LastWriteTime'ı koruduğu için grup klasörleri 60 sn'lik sessizlik
     /// kuralını beklemeden bir sonraki turda hazırdır.</summary>
-    private void SplitMultiBrandFolder(string folder, List<string> excelFiles, FullScanOcrPool ocrPool, CancellationToken ct)
+    private void SplitMultiBrandFolder(string folder, List<string> excelFiles, OcrEnginePool ocrPool, CancellationToken ct)
     {
         var folderName = Path.GetFileName(folder);
         var parentDir = Path.GetDirectoryName(folder)!;
@@ -830,8 +910,26 @@ public class Worker : BackgroundService
         // islendi.txt orijinal klasörü kapatır: buradaki iş bölmeden ibaret, fiyatlama grup
         // klasörlerinde yapılacak. Atanamayan görseller bu raporla birlikte arşivlenmiş olur.
         File.WriteAllText(Path.Combine(folder, "islendi.txt"), sb.ToString(), Encoding.UTF8);
+        // Bölme burada gönderim içermez (grup klasörleri kendi akışında gönderir), yani bu
+        // orijinal konteyner klasör için "iş bitti" = islendi.txt yazıldı; hemen arşivlenebilir.
+        ArchiveIfComplete(folder);
         _logger.LogInformation("=== Bölme tamamlandı: {Folder} — {Groups} grup, {Unassigned} atanamayan görsel. Gruplar sonraki turda işlenecek. ===",
             folder, groupImages.Count(g => g.Count > 0), unassigned.Count);
+    }
+
+    /// <summary>islendi.txt raporundan müşteriye WhatsApp metni olarak gönderilecek sürümü türetir
+    /// (SendReportToCustomer=true iken). "--- Gönderim ---" bölümü (alıcı numaraları + HTTP durum
+    /// kodları gibi iç detaylar) çıkarılır ve iç kullanım etiketi "DAMGALANDI" müşteriye yönelik
+    /// "ETİKETLİ" ile değiştirilir ("DAMGALANDI-FUZZY, KONTROL ÖNERİLİR" -> "ETİKETLİ-FUZZY, KONTROL
+    /// ÖNERİLİR" olur, kasıtlı). islendi.txt dosyasının kendisi bu fonksiyondan etkilenmez.</summary>
+    private static string BuildCustomerFacingReport(string fullReport)
+    {
+        var start = fullReport.IndexOf("--- Gönderim (al", StringComparison.Ordinal);
+        var end = fullReport.IndexOf("--- Özet ---", StringComparison.Ordinal);
+        var trimmed = (start >= 0 && end > start)
+            ? fullReport.Remove(start, end - start)
+            : fullReport;
+        return trimmed.Replace("DAMGALANDI", "ETİKETLİ", StringComparison.Ordinal);
     }
 
     private static string BuildReport(

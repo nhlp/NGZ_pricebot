@@ -1,0 +1,68 @@
+== PaddleOCR motoru hazirlaniyor (EnglishV4) ==
+
+=========================================================
+=== ERAY KIDS (33 gorsel, prod: 0/33 damgalandi) ===  Excel kod sayisi: 150
+  [BULAMADI] gorsel_20260803_091056868_390ac5.jpg (2530 ms) -> eslesen: []
+      ham satirlar: for girls(96) | GlgAKIqg(41) | 6079(100) | MA(66) | 9-12-18-24(99) | (NaN) | months(100) | double set(95) | OUSd(23) | 00(46) | 6000(38) | SCFMEDYACopyright@TumHakan Sal(92)
+  [BULDU] gorsel_20260803_091056868_661ba5.jpg (1909 ms) -> eslesen: [6401]
+      ham satirlar: for girls(94) | egKias(21) | 6401(100) | 4-5-6-7(99) | 21692(83) | double set(100) | SUOWOR(62) | BoOOK(58) | SCFMEDYACopyright@Tum Haklan Sakldir(90)
+  [BULDU] gorsel_20260803_091056868_a4bd19.jpg (1508 ms) -> eslesen: [6541]
+      ham satirlar: for girls(97) | GlgAKiqg(32) | 6541(100) | 3-4-5-6(99) | of(39) | 2169(99) | mn(89) | SCFMEDYACopyright@Tum Haklan Sakidr(88)
+  [BULDU] gorsel_20260803_091056869_5b801b.jpg (1375 ms) -> eslesen: [6563]
+      ham satirlar: for girls(99) | GlgAKIqS(31) | 6563(100) | 2-3-4-5(100) | 21691(83) | double set(100) | SCFMEDYACopyright@Tum Haklan Sakld(91)
+  [BULDU] gorsel_20260803_091056869_7318a6.jpg (1083 ms) -> eslesen: [6389]
+      ham satirlar: orrrs(57) | GlgAKqg(28) | 6389(100) | 9-12-18-24(100) | months(100) | double set(98) | Xo0(26) | OYO1(19) | eeere(26)
+  [BULDU] gorsel_20260803_091056869_a5fdca.jpg (1152 ms) -> eslesen: [6518]
+      ham satirlar: for girls(93) | 6kgAKIqg(36) | 6518(100) | 9-12-18-24(100) | months(100) | triple set(100) | AN(41) | SCFMEDYACopyright@Tum Haklan Sakldr(85)
+--- ERAY KIDS (33 gorsel, prod: 0/33 damgalandi): PaddleOCR 5/6 gorselde en az bir kod buldu (prod Tesseract: 0/6) ---
+
+=========================================================
+=== ALISA (68 gorsel, prod: 0/68 damgalandi) ===  Excel kod sayisi: 142
+  [BULAMADI] gorsel_20260729_121402520_27ba09.jpg (1870 ms) -> eslesen: []
+      ham satirlar: beeo(50) | KidsNear(74) | 2 iP TAKIM(92) | 27-703(100) | 9-12-18-24AY/MONTH(98) | REKLAMCAStudio.Copyright O2026 Tum Haklan Saklidr.(91)
+  [BULAMADI] gorsel_20260729_121402520_575b88.jpg (1172 ms) -> eslesen: []
+      ham satirlar: ueeo(57) | KilsWear(83) | 27-189(100) | 3AAYe-8-T-a(69) | LIKRALI2IP(92) | DECO(99) | TAKIM(100) | DEC00(57) | REKLAMCA Studio.Copyright O2026 Tum Haklan Sakld(91)
+  [BULAMADI] gorsel_20260729_121402520_faa1de.jpg (2100 ms) -> eslesen: []
+      ham satirlar: deco(94) | KilsMear(83) | 27-187(100) | 6-7-8-9YAS/AGE(97) | LiKRALI2 iP(96) | TAKIM(100) | ATELIER(100) | crnB(92) | NORDIC(100) | 1987-(91) | AATR(53) | NORDIC(100) | 1987(100) | XX(69) | KEK1qcos0se(62)
+  [BULAMADI] gorsel_20260729_121402521_151c3b.jpg (2517 ms) -> eslesen: []
+      ham satirlar: dec9(75) | Kilstlear(79) | 1O(44) | Baskili Licrali(98) | Suprem Takim(98) | colour(100) | deco decodecodecodecodecodecodecodecodecodecodecodecode(89) | 27-868(100) | 9-24 Month(98) | acft!x(79) | Copyright  Tum haklari saklidir.(96)
+  [BULAMADI] gorsel_20260729_121402521_4b76b0.jpg (1679 ms) -> eslesen: []
+      ham satirlar: deco(98) | Wooo(28) | 10-2 RAPORLU(97) | INTERLOK TAKIM(98) | 26-346(100) | 9-12-18-24 AY/MONTH(96) | D(9) | SWEET(100) | A0(28) | LEEES(45) | EMEET(64) | MS(81) | CC(83) | 2MEEE(51) | eMMEI(72) | MS(98) | REKLAMCA Studio.Copyright O2025 Tum Hakan Saklidir(92)
+  [BULAMADI] gorsel_20260729_121402521_4c81cf.jpg (2645 ms) -> eslesen: []
+      ham satirlar: 27-180(100) | dec9(68) | 9-24 Month(99) | KidlsMear(82) | Waffle KumasTakim(96) | colour(100) | deco decodecodeco decodeco deco deco deco decodecodeco decode(86) | detail(100) | C(8) | UDD(85) | actifix(100) | Copyright @ Tum haklari saklidir.(93)
+--- ALISA (68 gorsel, prod: 0/68 damgalandi): PaddleOCR 0/6 gorselde en az bir kod buldu (prod Tesseract: 0/6) ---
+
+=========================================================
+=== LILITOP (20 gorsel, prod: 0/20 damgalandi) ===  Excel kod sayisi: 0
+  [BULAMADI] gorsel_20260731_153757987_0633e4.jpg (1423 ms) -> eslesen: []
+      ham satirlar: xititop(96) | iiiieo(52) | baby collection(96) | Coba  g aq(51) | DpOO(58) | 3956(100) | Montr(96) | 6-12-18-24(99)
+  [BULAMADI] gorsel_20260731_153757987_12aa0d.jpg (1600 ms) -> eslesen: []
+      ham satirlar: nli(28) | eonraiooegn(22) | ORIGINAL(97) | actifixCopyright  Tum haklari saklidir.(91) | Cade(40) | 4035(100) | DOW(39) | 6-12-18-24(99) | 12:44(96)
+  [BULAMADI] gorsel_20260731_153757987_2fefa7.jpg (1248 ms) -> eslesen: []
+      ham satirlar: E(24) | aO(29) | lilitop(99) | 4018(100) | ootonegon(40) | 6-12-18-24Month(100) | actifix(99) | Copyright  Tum haklari saklidir.(94)
+  [BULAMADI] gorsel_20260731_153757987_7e04d7.jpg (1205 ms) -> eslesen: []
+      ham satirlar: E(16) | DpO~(60) | 4032(100) | iiiil(45) | baby collection(96) | 6-12-18-24(99) | acCoba psks agkiqi(51) | 12:44(97)
+  [BULAMADI] gorsel_20260731_153757987_aa1c6a.jpg (995 ms) -> eslesen: []
+      ham satirlar: lilitop(99) | 4016(100) | oipairo Agr(26) | 6-12-18-24Month(100) | actifix(100) | Copyright  Tum haklari saklidir.(95) | HD(100) | 18:27(98)
+  [BULAMADI] gorsel_20260731_153757988_0243d3.jpg (1130 ms) -> eslesen: []
+      ham satirlar: Code(62) | lilitop(95) | 4031(100) | oaby collection(95) | C(16) | Month(100) | 6-12-18-24(99) | acCoba gkg agkq(57) | 12:44(97)
+--- LILITOP (20 gorsel, prod: 0/20 damgalandi): PaddleOCR 0/6 gorselde en az bir kod buldu (prod Tesseract: 0/6) ---
+
+=========================================================
+=== FIYAT LISTESI - isimsiz marka (109 gorsel, prod: 0/109 damgalandi) ===  Excel kod sayisi: 5
+  [BULAMADI] gorsel_20260728_152207338_b5122c.jpg (1236 ms) -> eslesen: []
+      ham satirlar: Bobyhi(97) | 473(100) | 9-12-18/MONTHS(99) | (NaN) | H(21) | A(16) | 5(16) | DY(24) | B8RR(39) | -(13) | (NaN) | (NaN)
+  [BULAMADI] gorsel_20260728_152208451_77ac18.jpg (942 ms) -> eslesen: []
+      ham satirlar: BEAR(100) | Booyhi(91) | SMAF(21) | 479(100) | 9-12-18Months(99)
+  [BULAMADI] gorsel_20260728_152209055_434c66.jpg (719 ms) -> eslesen: []
+      ham satirlar: E8(22) | Bobyhi(98) | S(12) | 732(100) | 9-12-18Months(99)
+  [BULAMADI] gorsel_20260728_152209600_f22425.jpg (774 ms) -> eslesen: []
+      ham satirlar: O(24) | Bobyhi(92) | 736(100) | 9-12-18Months(99)
+  [BULAMADI] gorsel_20260728_152210826_031e77.jpg (646 ms) -> eslesen: []
+      ham satirlar: Bobyhi(97) | 738(100) | 9-12-18Months(99)
+  [BULAMADI] gorsel_20260728_152211617_d73dc1.jpg (384 ms) -> eslesen: []
+      ham satirlar: Bobyhi(97) | 747(100) | 9-12-18 Months(97)
+--- FIYAT LISTESI - isimsiz marka (109 gorsel, prod: 0/109 damgalandi): PaddleOCR 0/6 gorselde en az bir kod buldu (prod Tesseract: 0/6) ---
+[ATLA] Excel bulunamadi: C:\Users\glnhl\OneDrive\MasaÅstÅ\NGZ\TEST_GELEN\Gonderim_20260730_121359_3a9a4483\20260730_121359199_611de7_2026 MEVSòMLòK NET FòYAT LòSTESò.xlsx
+
+===== TOPLAM: 5/24 gorselde PaddleOCR en az bir Excel koduyla eslesti =====

@@ -192,6 +192,47 @@ public static class BrandMatcher
         return new OcrBrandOutcome(approxDistinct[0].Brand, [approxDistinct[0].Evidence], [], Approximate: true);
     }
 
+    /// <summary>Marka hiç tespit edilemediğinde (kesin de yaklaşık da eşleşme yok) İLK soruya
+    /// eklenecek "tahmini" öneriler: OCR token'larının markaların ayırt edici kelimelerine ne
+    /// kadar yakın olduğuna bakar (MatchFromOcrTokens'ın aksine burada kesinlik aranmaz, sadece
+    /// en yakın adaylar listelenir). Hiçbir token hiçbir markaya makul yakınlıkta değilse boş
+    /// döner — anlamsız/gürültü öneri göstermemek tercih edilir.</summary>
+    public static List<string> SuggestBrandsFromOcrTokens(
+        IReadOnlyDictionary<string, float> rawTokens,
+        IReadOnlyList<BrandMultiplier> brands,
+        int maxSuggestions = 5)
+    {
+        var tokens = rawTokens
+            .SelectMany(kv => NormalizeToWords(kv.Key).Select(w => (Word: w, Conf: kv.Value)))
+            .Where(t => t.Word.Length >= 3 && t.Conf >= MinWordConfidence && t.Word.Any(char.IsAsciiLetter))
+            .Select(t => t.Word)
+            .Distinct()
+            .ToList();
+        if (tokens.Count == 0 || brands.Count == 0) return [];
+
+        var scored = new List<(string FullName, double Ratio)>();
+        foreach (var group in brands.GroupBy(b => NormalizeJoined(b.FullName)))
+        {
+            var brand = group.First();
+            var words = NormalizeToWords(brand.FullName).Where(IsDistinctive).ToList();
+            if (words.Count == 0) continue;
+
+            // Marka bu turda zaten eşleşmiş olamaz (buraya sadece eşleşme bulunamadığında
+            // girilir), o yüzden en iyi (en düşük) mesafe oranı doğrudan alınabilir.
+            var bestRatio = words
+                .SelectMany(w => tokens.Select(t => (double)Levenshtein(w, t) / Math.Max(w.Length, t.Length)))
+                .Min();
+            scored.Add((brand.FullName, bestRatio));
+        }
+
+        return scored
+            .Where(x => x.Ratio <= 0.4)
+            .OrderBy(x => x.Ratio)
+            .Take(maxSuggestions)
+            .Select(x => x.FullName)
+            .ToList();
+    }
+
     /// <summary>Rakamları görsel olarak benzedikleri harflere çevirir ("FLAM1NDO" → "FLAMINDO").
     /// FullScanOcr'daki Confusions tablosunun tersi — orada harfler rakama, burada rakamlar harfe.</summary>
     private static string LetterizeDigits(string word)

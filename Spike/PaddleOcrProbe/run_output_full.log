@@ -1,0 +1,626 @@
+== Tesseract motoru hazirlaniyor (mevcut prod pipeline, FullScanOcr degismeden) ==
+== PaddleOCR motoru hazirlaniyor (EnglishV4) ==
+
+=========== sample1.jpg ===========
+Estimating resolution as 475
+Estimating resolution as 475
+Estimating resolution as 475
+Estimating resolution as 475
+Estimating resolution as 607
+Image too small to scale!! (2x36 vs min width of 3)
+Line cannot be recognized!!
+Image too small to scale!! (2x36 vs min width of 3)
+Line cannot be recognized!!
+Estimating resolution as 607
+Image too small to scale!! (1x36 vs min width of 3)
+Line cannot be recognized!!
+Estimating resolution as 607
+Image too small to scale!! (2x36 vs min width of 3)
+Line cannot be recognized!!
+Image too small to scale!! (2x36 vs min width of 3)
+Line cannot be recognized!!
+Estimating resolution as 607
+Image too small to scale!! (1x36 vs min width of 3)
+Line cannot be recognized!!
+Estimating resolution as 1346
+Estimating resolution as 1346
+Estimating resolution as 1346
+Estimating resolution as 1346
+Estimating resolution as 812
+Detected 250 diacritics
+Estimating resolution as 812
+Estimating resolution as 812
+Detected 250 diacritics
+Estimating resolution as 812
+Estimating resolution as 558
+Estimating resolution as 558
+Estimating resolution as 558
+Estimating resolution as 558
+Estimating resolution as 968
+Estimating resolution as 968
+Estimating resolution as 968
+Estimating resolution as 968
+Estimating resolution as 765
+Estimating resolution as 765
+Estimating resolution as 765
+Estimating resolution as 765
+Estimating resolution as 1356
+Estimating resolution as 1356
+Estimating resolution as 1356
+Estimating resolution as 1356
+Estimating resolution as 2006
+Estimating resolution as 2006
+Estimating resolution as 2006
+Estimating resolution as 2006
+Estimating resolution as 1353
+Image too small to scale!! (2x36 vs min width of 3)
+Line cannot be recognized!!
+Estimating resolution as 1353
+Estimating resolution as 1353
+Image too small to scale!! (2x36 vs min width of 3)
+Line cannot be recognized!!
+Estimating resolution as 1353
+[Tesseract] 27016 ms, 230 token (conf>=30):
+  |(97) | -(95) | CODE(93) | AGE:2/3/4/5(92) | 4(92) | PAMTIME(92) | CODE:317617(91) | S-M(91) | /(91) | Y(91) | TAKIM(91) | 1)(90) | :317617(89) | OYSHC(89) | OYSHO(88) | 0(88) | KIDS(87) | <(85) | -(85) | N(84) | 1(83) | P4(83) | &(83) | ~(82) | =(80) | N~(80) | O(79) | .(77) | "(76) | WA(74) | N/(74) | //(72) | )(70) | G(70) | '-.'N(70) | A(70) | ((70) | 7(69) | >(69) | S(69) | 00(69) | L(68) | F(68) | [\(67) | /:.(66) | K(66) | ½(65) | T(65) | ¾(65) | R/(64) | 'A(63) | :(63) | YOY(63) | ,J(63) | ,(62) | X(62) | \'I((62) | :/(62) | ¾Y(62) | {(62) | L'L'(61) | '7.(60) | AL(60) | 11(60) | \¯(60) | =7(60) | E(59) | L))(59) | 7.(59) | 71(59) | 5(59) | 20(59) | J'_-(59) | 42(59) | 77(59) | (4(59) | R(59) | 55(58) | K.(58) | 5\(58) | 45(58) | 9(58) | (%(57) | ;(57) | "L.(56) | 3492(56) | %(56) | 14(56) | '(56) | 6(56) | R'D(56) | TW(55) | -,(55) | \'(55) | WV(54) | 3 1571(54) | D(54) | L-".(54) | \!'L(54) | 15(54) | \1'(54) | \-/'(54) | (V';"(53) | F'\\(53) | '3(53) | 50(53) | I(53) | I"(53) | "'L(52) | (W(52) | 4,(52) | '("?'(52) | 3(52) | œ(52) | 1/(52) | 'NB'(52) | 13(52) | \3(51) | '\(51) | G5(51) | {'4(51) | 0,"""(51) | (/'R?B(51) | M|(51) | "-?-(51) | '?Z(51) | RI\(51) | U/?\(51) | L/;\(51) | Q"Q(50) | 01(50) | 'L"F(50) | "%"}C(50) | J(50) | 455(50) | ?.'(49) | ,'.'(49) | 6\(49) | ""'\¯?A(49) | /F"'(49) | 6937811012310111(48) | 'Q\\H'(48) | 53(48) | )K*(48) | "(48) | AY(48) | 6"'(47) | 21(47) | (SB(47) | 114(47) | I3(47) | œ\(46) | 31(46) | B\(46) | "'(46) | B(46) | %B'?(45) | ':NI'(45) | 011(45) | }(45) | 131(45) | 455349(44) | 697(44) | &,(44) | -Y(44) | (7(44) | %LI(44) | \'(44) | =0(44) | O'/?/(43) | \'\(43) | IY(43) | 43(43) | (-4(43) | 1 0(42) | 16(42) | 2 13(42) | L.'\(42) | 2(42) | @'R(42) | 4õ'(42) | 113(41) | TNY(41) | ¾T(41) | 57(41) | 'G(41) | 5%(40) | /"A::.:.'"I'.T(40) | .4(40) | LR(40) | 4\'*\(40) | 541(40) | 04(40) | LL(39) | BQ(39) | \\(39) | LN(39) | P(39) | 415(38) | OYSHQTAKLM(38) | [,(38) | 5459(38) | '-J.N(38) | õ(37) | "Z(37) | 33(37) | T\(37) | YO(37) | [(37) | GY(36) | 2N(36) | VA(36) | WAL(35) | 1217(35) | NI(34) | LIRS(34) | OYSHO@(33) | A\(33) | "V(33) | @YSHO)TAKIM(32) | .,(32) | ALY(32) | O,(31) | 3  9(31) | 1011(31) | 7 0   5(31) | '(30) | OO(30) | OK~(30) | VL(30)
+[PaddleOCR] 1108 ms, 6 satir:
+  Pamtime(100) | KIDS(99) | code:317617(99) | S-M(99) | Oysho takim(98) | gd6:534\2(83)
+
+=========== sample10.jpg ===========
+Estimating resolution as 587
+Estimating resolution as 587
+Estimating resolution as 587
+Estimating resolution as 587
+Estimating resolution as 758
+Estimating resolution as 758
+Detected 65 diacritics
+Estimating resolution as 758
+Estimating resolution as 758
+Detected 65 diacritics
+Estimating resolution as 1671
+Estimating resolution as 1671
+Estimating resolution as 1671
+Estimating resolution as 1671
+Estimating resolution as 737
+Estimating resolution as 737
+Empty page!!
+Estimating resolution as 737
+Estimating resolution as 737
+Empty page!!
+Estimating resolution as 349
+Estimating resolution as 349
+Estimating resolution as 349
+Estimating resolution as 349
+Estimating resolution as 313
+Estimating resolution as 313
+Estimating resolution as 313
+Estimating resolution as 313
+Estimating resolution as 414
+Estimating resolution as 414
+Estimating resolution as 414
+Estimating resolution as 414
+Estimating resolution as 913
+Estimating resolution as 913
+Estimating resolution as 913
+Estimating resolution as 913
+Estimating resolution as 1031
+Estimating resolution as 1031
+Estimating resolution as 1031
+Estimating resolution as 1031
+[Tesseract] 19621 ms, 149 token (conf>=30):
+  1378(97) | BY(94) | ½(94) | -(92) | BA(92) | BABY(91) | I(91) | 3-4-5-6(90) | P(90) | |(90) | 4(89) | -(87) | AGE(85) | /(85) | FL(85) | [/(84) | R(84) | W(83) | M(83) | N(83) | %(82) | A(82) | &(81) | .(80) | J(79) | )(78) | ¯(77) | X(77) | D(77) | 1(74) | {(72) | V\(72) | \(71) | ](71) | '\(70) | ('(70) | G(68) | P'(67) | -2(66) | M?'""(66) | 10(66) | V(64) | 7(64) | L'L..(64) | 2(63) | 35(63) | 13(63) | ?(62) | "L\(62) | ,(62) | 0(62) | 5(62) | I\(62) | T:'.(62) | "'(62) | <(61) | '(61) | \'(61) | 47(60) | 'IN,(60) | A,(60) | )S(60) | $(60) | A/(60) | 55(59) | JF(59) | 'F(58) | F(58) | I.(58) | AL(58) | Y-(58) | -S(57) | J"N(57) | --.'(57) | 15(57) | \_(57) | '}'(57) | ½\\(56) | \S-)(56) | .Y(55) | 511(55) | VL'(54) | -'J(54) | ...."'W(54) | 9(54) | /S\(53) | ?'(53) | @(53) | >(53) | L(52) | 33(52) | 'P'H.?\'(52) | 'M\'!"V',?"'(52) | [(51) | 71(51) | FLAMI(51) | \\(51) | /I(51) | \J'(51) | 63(51) | G;(50) | AN(50) | E(50) | 27(50) | "N(50) | }(50) | 5'*&?(50) | ,/'F"-(49) | \'\\(49) | 122(49) | 3(48) | ¾Y(48) | 154(48) | 132(48) | '?)S(47) | '.(47) | W\(46) | F'-'-'(46) | A\\';(46) | *"(46) | =L(45) | C\"(45) | 233(45) | YF(45) | H'(45) | L"(44) | 011(43) | 8(43) | UI(42) | .-(41) | "(40) | X'V(40) | S(39) | /7/,(39) | 815(39) | JY(38) | ET/(37) | B(36) | W)(35) | 348(34) | 1715(34) | ';'/\(34) | 0L(33) | O(33) | ~(33) | ¾(32) | PY(32) | 14(31) | QEY(30)
+[PaddleOCR] 627 ms, 6 satir:
+  1378(100) | BABY(99) | AGE/3-4-5-6(99) | FLAMINDO(99) | A(42) | T(12)
+
+=========== sample11.jpg ===========
+Estimating resolution as 760
+Estimating resolution as 760
+Estimating resolution as 760
+Estimating resolution as 760
+Estimating resolution as 1058
+Estimating resolution as 1058
+Estimating resolution as 1058
+Estimating resolution as 1058
+Estimating resolution as 1214
+Estimating resolution as 1214
+Estimating resolution as 1214
+Estimating resolution as 1214
+Estimating resolution as 1407
+Estimating resolution as 1407
+Empty page!!
+Estimating resolution as 1407
+Estimating resolution as 1407
+Empty page!!
+Estimating resolution as 1593
+Estimating resolution as 1593
+Estimating resolution as 1593
+Estimating resolution as 1593
+Estimating resolution as 723
+Estimating resolution as 723
+Estimating resolution as 723
+Estimating resolution as 723
+Estimating resolution as 459
+Estimating resolution as 459
+Estimating resolution as 459
+Estimating resolution as 459
+Estimating resolution as 558
+Estimating resolution as 558
+Estimating resolution as 558
+Estimating resolution as 558
+[Tesseract] 18699 ms, 104 token (conf>=30):
+  1350(97) | |(96) | /(92) | &(92) | MONHTS/6-12-18-24(91) | BABY(90) | FL(89) | 4(86) | F-(85) | )(84) | CD(83) | D(82) | =P(79) | ½(79) | 1(78) | /\(75) | J(75) | -(75) | @(72) | A(71) | U(71) | <(71) | FLY(71) | [T(69) | ...(69) | .//(68) | R-((68) | ©)(68) | ,(66) | 1.(64) | I(63) | >(63) | ~(63) | L(63) | B(63) | 0(62) | V(61) | \P(61) | )\(60) | &)(60) | 3(60) | :"(60) | L4(60) | 03(60) | ((60) | &,(60) | 21(59) | ///(59) | -(58) | ---(57) | 9(57) | T\'(57) | }(56) | %(56) | /RR(56) | P(55) | 5(55) | 430(55) | M}'(55) | 41(54) | 6(54) | 2(52) | /'-J(52) | I(52) | M(51) | -L(50) | '\A(50) | 8(49) | PL(49) | 14(49) | 83(49) | FLYYMI(48) | E(48) | 24(48) | 50(47) | V)(47) | (5(47) | FLYM(46) | &(46) | (-(45) | =(45) | I\(44) | {"(44) | S(43) | SY(41) | '"-.'__(41) | 1L(41) | /.(40) | LAY(39) | 85(39) | 331(38) | PT(38) | 33(38) | ._.A(37) | .(36) | 4D(33) | ©(31) | )Y(31) | A\(31) | 343(31) | 334(31) | 1  10(31) | FLYAMI(31) | TTENDZ(31)
+[PaddleOCR] 1178 ms, 16 satir:
+  1350(100) | FLAMINDO(99) | BABY(99) | SANTI(79) | woup\e-5-8-5(74) | FINDS(74) | USIENDE(69) | SANE(69) | SANIE(65) | 8AI(49) | 0(41) | 23(32) | 1E(25) | n(17) | (NaN) | (NaN)
+
+=========== sample12.jpg ===========
+Estimating resolution as 761
+Estimating resolution as 761
+Estimating resolution as 761
+Estimating resolution as 761
+Estimating resolution as 812
+Estimating resolution as 812
+Estimating resolution as 812
+Estimating resolution as 812
+Estimating resolution as 1832
+Estimating resolution as 1832
+Estimating resolution as 1832
+Estimating resolution as 1832
+Estimating resolution as 1388
+Estimating resolution as 1388
+Estimating resolution as 1388
+Estimating resolution as 1388
+Estimating resolution as 2216
+Estimating resolution as 2216
+Estimating resolution as 2216
+Estimating resolution as 2216
+Estimating resolution as 2334
+Estimating resolution as 2334
+Estimating resolution as 2334
+Estimating resolution as 2334
+Estimating resolution as 1311
+Estimating resolution as 1311
+Estimating resolution as 1311
+Estimating resolution as 1311
+Estimating resolution as 460
+Estimating resolution as 460
+Estimating resolution as 460
+Estimating resolution as 460
+Estimating resolution as 1901
+Estimating resolution as 1901
+Estimating resolution as 1901
+Estimating resolution as 1901
+[Tesseract] 17310 ms, 95 token (conf>=30):
+  &(94) | \(93) | A(92) | BABY(91) | V(90) | 3-4-5-6(89) | D(89) | N(88) | |(86) | <(86) | O(86) | AGE(84) | /(84) | %(81) | -(79) | L4(78) | 1375-(78) | 4(77) | \\(73) | /7,(72) | &R(72) | &8(71) | '(70) | AGE/(70) | {(69) | =(69) | I(68) | 2>(68) | R(67) | \'L(66) | AN(66) | /"(65) | @(65) | 7(63) | )(63) | '-1.'(61) | 1(61) | 2(61) | 0(60) | G-(57) | 22(57) | '5(57) | 51(57) | /'-(56) | 14(56) | [(56) | :(56) | 1591(56) | 1375:(56) | 5(56) | LY(55) | H"L(54) | 33(54) | /I(54) | 73(54) | AT,(53) | -(53) | 'NW(51) | T(51) | U,']L(51) | 27(50) | P(50) | 1375(50) | 3(49) | Y0(47) | H\\'(47) | (Y(47) | 195(47) | IT(46) | 53(45) | "(44) | ,¯(44) | 9(44) | 49(44) | \'_,(44) | @N'(43) | '(43) | 37(42) | 1ø7\(42) | ')(41) | ALY(41) | 1  5(39) | &)(38) | /D(38) | G(37) | S(37) | ((35) | W(34) | P\(33) | .'{(33) | A\(32) | L/(32) | 1401(32) | '-'LQ(31) | ET(31)
+[PaddleOCR] 721 ms, 4 satir:
+  1375(100) | BABY(99) | AGE/3-4-5-6(99) | FLAMINDO(99)
+
+=========== sample13.jpg ===========
+Estimating resolution as 479
+Estimating resolution as 479
+Detected 84 diacritics
+Estimating resolution as 479
+Estimating resolution as 479
+Detected 84 diacritics
+Estimating resolution as 1104
+Estimating resolution as 1104
+Estimating resolution as 1104
+Estimating resolution as 1104
+Estimating resolution as 1573
+Estimating resolution as 1573
+Detected 69 diacritics
+Empty page!!
+Estimating resolution as 1573
+Estimating resolution as 1573
+Detected 69 diacritics
+Empty page!!
+Estimating resolution as 1819
+Estimating resolution as 1819
+Estimating resolution as 1819
+Estimating resolution as 1819
+Estimating resolution as 712
+Estimating resolution as 712
+Estimating resolution as 712
+Estimating resolution as 712
+Estimating resolution as 346
+Estimating resolution as 346
+Empty page!!
+Estimating resolution as 346
+Estimating resolution as 346
+Empty page!!
+Estimating resolution as 2394
+Estimating resolution as 2394
+Estimating resolution as 2394
+Estimating resolution as 2394
+Estimating resolution as 1787
+Estimating resolution as 1787
+Estimating resolution as 1787
+Estimating resolution as 1787
+Estimating resolution as 1529
+Estimating resolution as 1529
+Estimating resolution as 1529
+Estimating resolution as 1529
+Estimating resolution as 1351
+Estimating resolution as 1351
+Estimating resolution as 1351
+Estimating resolution as 1351
+[Tesseract] 15609 ms, 103 token (conf>=30):
+  1345(96) | \(91) | 4(91) | ½(91) | BABY(90) | D(89) | MONHTS/6-12-18-24(89) | FL(87) | |(87) | I(86) | =(86) | /(83) | @(78) | N\(75) | %(75) | /|(75) | 1(73) | &(72) | 2(71) | ?(71) | A(70) | Z(69) | 7(69) | L!(68) | .(68) | |](68) | N'L"(64) | )(64) | 11(64) | B(63) | W(63) | 0(62) | ¾(60) | \T\(59) | ////////M"""(59) | 14(59) | ?(58) | K(58) | IN"(58) | '|(58) | ./'*J(57) | 77(57) | 17(57) | 1 3(56) | E(55) | 3(55) | 'L\(55) | S(54) | =I~(54) | F(53) | '\(53) | IL(53) | ('"!QW?"'(53) | 'V(53) | 41(52) | 111(50) | 9(49) | I]'K(49) | 7](49) | I,(49) | \"'(48) | FLYYMI(48) | (|(46) | [Y(45) | |\(45) | ;(45) | 2N(44) | ',(44) | FLY:(44) | M(43) | 11!\;(42) | '(41) | 153(41) | -(41) | I\\(41) | L(40) | KL'(39) | ?,!.'NLJ,')!/(39) | O(39) | 5(39) | 24(39) | 11 1(39) | 65(39) | MN'(39) | (.(39) | T{F'(38) | PT(38) | N(38) | 3.(38) | OK(37) | ](37) | T(36) | 3 3(36) | 70(36) | 73(35) | >(34) | (Y1(33) | 3!(33) | OO,(33) | 3 0 1(32) | UL(32) | 'Y(31) | @?(31)
+[PaddleOCR] 765 ms, 7 satir:
+  1345(100) | FLAMINDO(99) | BABY(99) | monhts/6-12-18-24(96) | ROY(43) | -(22) | (NaN)
+
+=========== sample14.jpg ===========
+Estimating resolution as 596
+Estimating resolution as 596
+Estimating resolution as 596
+Estimating resolution as 596
+Estimating resolution as 971
+Estimating resolution as 971
+Estimating resolution as 971
+Estimating resolution as 971
+Estimating resolution as 806
+Detected 19 diacritics
+Estimating resolution as 806
+Detected 20 diacritics
+Estimating resolution as 806
+Detected 19 diacritics
+Estimating resolution as 806
+Detected 20 diacritics
+Estimating resolution as 1349
+Estimating resolution as 1349
+Estimating resolution as 1349
+Estimating resolution as 1349
+Estimating resolution as 2281
+Estimating resolution as 2281
+Estimating resolution as 2281
+Estimating resolution as 2281
+Estimating resolution as 2266
+Estimating resolution as 2266
+Estimating resolution as 2266
+Estimating resolution as 2266
+Estimating resolution as 851
+Estimating resolution as 851
+Estimating resolution as 851
+Estimating resolution as 851
+Estimating resolution as 933
+Estimating resolution as 933
+Estimating resolution as 933
+Estimating resolution as 933
+Estimating resolution as 1119
+Estimating resolution as 1119
+Estimating resolution as 1119
+Estimating resolution as 1119
+Estimating resolution as 719
+Estimating resolution as 719
+Detected 32 diacritics
+Empty page!!
+Estimating resolution as 719
+Estimating resolution as 719
+Detected 32 diacritics
+Empty page!!
+[Tesseract] 19746 ms, 137 token (conf>=30):
+  1374(96) | T(94) | |(93) | BABY(91) | AGE(90) | 3-4-5-6(90) | /(89) | D(88) | 1(87) | .(86) | N(84) | !(84) | =(84) | \\(79) | A(79) | --/(77) | AL(76) | YOU(75) | /\(74) | -(73) | 2(73) | I(73) | &(73) | STITCH(72) | 11(71) | 3(69) | )(69) | FIM(69) | B(68) | |'(68) | '((67) | 7(67) | '-\I(65) | OF(64) | LA-RE(64) | ?'(63) | [(63) | H)(63) | œ(63) | '(63) | 477(62) | 5(61) | O(61) | \(61) | )Y(60) | H(60) | 3!(59) | 46 51(59) | 5111(58) | OO(58) | IW(58) | /I(58) | \-?/"(57) | A\(57) | 0651(56) | J(55) | 0(55) | 27(54) | F(54) | IL(53) | SQ?(53) | ,.W"(53) | (\(52) | \.(52) | (.(51) | B3(50) | 35(50) | XF\L(50) | Y,(50) | L4(50) | >(50) | S(49) | LH(49) | :(49) | /)(49) | P\(48) | }3(48) | '\\(48) | Y'/(47) | YO8(47) | VI(47) | //,\,(46) | \Z½(46) | 2N(46) | 1)(46) | 4\(46) | E(45) | -®(45) | '\%---/(45) | |}(44) | LO/(44) | -(44) | &=(44) | 8(44) | 58(44) | 15(44) | 34(43) | XT\(43) | 4(43) | 'P(43) | TN(43) | 4 3(43) | LT(42) | ?FFF(42) | -??(41) | ..---"\-T.(41) | {5{%(40) | FLYAMI(40) | &T(40) | 156(39) | 04(39) | I-?R(39) | 5 34(38) | 30(38) | &)(38) | XN(38) | 71(38) | *4/(37) | \\&'(37) | V.I"R'.-(37) | BNY(37) | 1 11(36) | Y(36) | 13(36) | ".X(36) | 9(35) | 55(35) | )0(35) | BY(34) | N,(34) | LA(33) | 3115(33) | O)(32) | L.(31) | SN(31) | 51  55 31  1   5(31) | @(31)
+[PaddleOCR] 811 ms, 9 satir:
+  1374(100) | BABY(99) | FLAMINDO(99) | AGE73-4-5-6(96) | MAMER LLH AON(71) | eLCY(42) | EE(21) | 6(18) | O(12)
+
+=========== sample15.jpg ===========
+Estimating resolution as 550
+Estimating resolution as 550
+Estimating resolution as 550
+Estimating resolution as 550
+Estimating resolution as 1108
+Estimating resolution as 1108
+Estimating resolution as 1108
+Estimating resolution as 1108
+Estimating resolution as 2026
+Detected 49 diacritics
+Estimating resolution as 2026
+Detected 5 diacritics
+Estimating resolution as 2026
+Detected 49 diacritics
+Estimating resolution as 2026
+Detected 5 diacritics
+Estimating resolution as 1525
+Estimating resolution as 1525
+Estimating resolution as 1525
+Estimating resolution as 1525
+Estimating resolution as 550
+Estimating resolution as 550
+Estimating resolution as 550
+Estimating resolution as 550
+Estimating resolution as 1507
+Estimating resolution as 1507
+Estimating resolution as 1507
+Estimating resolution as 1507
+Estimating resolution as 335
+Estimating resolution as 335
+Empty page!!
+Estimating resolution as 335
+Estimating resolution as 335
+Empty page!!
+Empty page!!
+Empty page!!
+[Tesseract] 19670 ms, 141 token (conf>=30):
+  |(96) | .(95) | -(92) | BABY(91) | 3-4-5-6(90) | I(87) | )(87) | N(87) | \(87) | {(84) | /(83) | %(82) | AGE(80) | D(78) | 1(78) | !(77) | V(74) | FL(73) | 1378(73) | 'E(72) | "(70) | 1379(70) | =(70) | /-(69) | [(69) | \.(69) | ((68) | '.U(68) | A(68) | \"(66) | ("(65) | 7(65) | 6\(65) | :(65) | 4(65) | \)\(65) | \\(64) | /6\(63) | :L'(63) | 6(63) | F,(X"(61) | I)(61) | -':'(60) | -T(60) | '*I:)(59) | 11(59) | 3(58) | ,\D(58) | \\'(58) | '4(58) | 13789(58) | M(58) | /')'"/(58) | LH(58) | \1(57) | 0(57) | J(57) | E.(57) | /'.A'(57) | }T(56) | '(56) | L4(56) | /I(56) | 48(56) | ;L':;I\\(56) | B'U.';(55) | (](55) | "':2'?\(55) | '.('(55) | .!(55) | H(54) | 45(54) | Y(54) | 114(54) | 1])\\(53) | tI(53) | 'L::'.(53) | 9'4\\'(53) | 5(53) | .J"V(53) | @I(53) | 10O(52) | G(52) | 34(52) | --(52) | O(52) | L(52) | -.'(51) | '\M(50) | AR(50) | '.5>(50) | P(50) | 27(50) | 2(50) | =L(50) | 1:0(50) | 13(50) | ;,'\(49) | ½/(48) | ?(47) | 354(46) | F\(45) | \,-&_(45) | Y4(45) | 111(45) | IY(44) | 2%,(44) | JH(43) | '@"'1(43) | ¾/(42) | œ(42) | L.(41) | ,}(41) | .,(40) | F(40) | \L(39) | 51511(39) | 019331(39) | .-.'\'.Q\(38) | K.(37) | CF*':F(37) | 9&1'(36) | ET(36) | 404(36) | 9(36) | E(36) | IZ(35) | 2'(35) | S(35) | 51(35) | T(34) | 1   7 7 4  1  3 171        42(33) | GK(33) | XS((33) | ®?(32) | BYL(32) | OY(32) | LL(31) | 1 5(31) | B(30) | 0"(30)
+[PaddleOCR] 889 ms, 10 satir:
+  1379(100) | BABY(99) | FLAMINDO(99) | AGE73-4-5-6(96) | 888(76) | 888(58) | -(49) | LANNO(45) | 486(23) | O(11)
+
+=========== sample16.jpg ===========
+Estimating resolution as 760
+Estimating resolution as 760
+Estimating resolution as 760
+Estimating resolution as 760
+Estimating resolution as 1058
+Estimating resolution as 1058
+Estimating resolution as 1058
+Estimating resolution as 1058
+Estimating resolution as 1214
+Estimating resolution as 1214
+Estimating resolution as 1214
+Estimating resolution as 1214
+Estimating resolution as 1407
+Estimating resolution as 1407
+Empty page!!
+Estimating resolution as 1407
+Estimating resolution as 1407
+Empty page!!
+Estimating resolution as 1593
+Estimating resolution as 1593
+Estimating resolution as 1593
+Estimating resolution as 1593
+Estimating resolution as 723
+Estimating resolution as 723
+Estimating resolution as 723
+Estimating resolution as 723
+Estimating resolution as 459
+Estimating resolution as 459
+Estimating resolution as 459
+Estimating resolution as 459
+Estimating resolution as 558
+Estimating resolution as 558
+Estimating resolution as 558
+Estimating resolution as 558
+[Tesseract] 17829 ms, 104 token (conf>=30):
+  1350(97) | |(96) | /(92) | &(92) | MONHTS/6-12-18-24(91) | BABY(90) | FL(89) | 4(86) | F-(85) | )(84) | CD(83) | D(82) | =P(79) | ½(79) | 1(78) | /\(75) | J(75) | -(75) | @(72) | A(71) | U(71) | <(71) | FLY(71) | [T(69) | ...(69) | .//(68) | R-((68) | ©)(68) | ,(66) | 1.(64) | I(63) | >(63) | ~(63) | L(63) | B(63) | 0(62) | V(61) | \P(61) | )\(60) | &)(60) | 3(60) | :"(60) | L4(60) | 03(60) | ((60) | &,(60) | 21(59) | ///(59) | -(58) | ---(57) | 9(57) | T\'(57) | }(56) | %(56) | /RR(56) | P(55) | 5(55) | 430(55) | M}'(55) | 41(54) | 6(54) | 2(52) | /'-J(52) | I(52) | M(51) | -L(50) | '\A(50) | 8(49) | PL(49) | 14(49) | 83(49) | FLYYMI(48) | E(48) | 24(48) | 50(47) | V)(47) | (5(47) | FLYM(46) | &(46) | (-(45) | =(45) | I\(44) | {"(44) | S(43) | SY(41) | '"-.'__(41) | 1L(41) | /.(40) | LAY(39) | 85(39) | 331(38) | PT(38) | 33(38) | ._.A(37) | .(36) | 4D(33) | ©(31) | )Y(31) | A\(31) | 343(31) | 334(31) | 1  10(31) | FLYAMI(31) | TTENDZ(31)
+[PaddleOCR] 939 ms, 16 satir:
+  1350(100) | FLAMINDO(99) | BABY(99) | SANTI(79) | woup\e-5-8-5(74) | FINDS(74) | USIENDE(69) | SANE(69) | SANIE(65) | 8AI(49) | 0(41) | 23(32) | 1E(25) | n(17) | (NaN) | (NaN)
+
+=========== sample2.jpg ===========
+Estimating resolution as 427
+Estimating resolution as 427
+Estimating resolution as 427
+Estimating resolution as 427
+Estimating resolution as 626
+Estimating resolution as 626
+Estimating resolution as 626
+Estimating resolution as 626
+Estimating resolution as 910
+Estimating resolution as 910
+Estimating resolution as 910
+Estimating resolution as 910
+Estimating resolution as 997
+Estimating resolution as 997
+Estimating resolution as 997
+Estimating resolution as 997
+Estimating resolution as 480
+Estimating resolution as 480
+Estimating resolution as 480
+Estimating resolution as 480
+Estimating resolution as 829
+Estimating resolution as 829
+Estimating resolution as 829
+Estimating resolution as 829
+Estimating resolution as 761
+Estimating resolution as 761
+Estimating resolution as 761
+Estimating resolution as 761
+Estimating resolution as 872
+Estimating resolution as 872
+Estimating resolution as 872
+Estimating resolution as 872
+Estimating resolution as 865
+Estimating resolution as 865
+Estimating resolution as 865
+Estimating resolution as 865
+Estimating resolution as 869
+Estimating resolution as 869
+Estimating resolution as 869
+Estimating resolution as 869
+[Tesseract] 28239 ms, 206 token (conf>=30):
+  =(94) | >(94) | -(93) | CEP(93) | OYSHO(93) | TAKIM(93) | AGE:(93) | YOK(93) | OYSH(93) | S-M(93) | \(92) | ISPANYOL(92) | 6/7/8(92) | 6/7/(92) | 6/7/8/9(91) | <(91) | CODE:317618(91) | M(90) | |(90) | PAMTIME(89) | AMTIME(88) | &(87) | ¾(87) | W(85) | ½)(84) | 4(83) | V(82) | œ/(82) | I(82) | ½(81) | E(79) | \½(78) | ISPAR(78) | SM(78) | 3(75) | \\(75) | 1(74) | &N(73) | 9(73) | )(72) | N(72) | AL(72) | NN(70) | 7(70) | X3(69) | .,(69) | A}(69) | /](68) | S\(68) | _'(68) | 'A(67) | A(67) | IL(67) | 11(66) | \\\(65) | R\(64) | 10(64) | 2(63) | 'RL(63) | !(62) | '/L(62) | 0(62) | AR(62) | T(62) | A'/(62) | '\(61) | ISPANYDL(61) | \'\\(61) | '"(60) | '!(59) | }(59) | O(58) | LO(58) | W:-";T(58) | \'\(58) | 3411(57) | '((57) | Y(57) | TH)(56) | -G(56) | ,.,(56) | 841(56) | -.'M(56) | R(56) | 45(55) | 6(55) | 8(55) | '/(55) | Q(55) | "(55) | 03151 1(54) | 12(54) | ((54) | -----(54) | ,(53) | D;SHO(53) | YA(53) | I'AMTIME(53) | 31(53) | .(53) | ':'(53) | ?\\(52) | ....,--(52) | 599(52) | SY(52) | Q\(52) | 'D'A(52) | I\(51) | ¯-(51) | 0315110(51) | 19(51) | T'F(50) | '\\\(50) | Y\(50) | -(50) | \%?(49) | 9:(49) | 40(49) | \'!(49) | FY(49) | S(49) | \;',(48) | H(48) | \((48) | /A(48) | M&\(48) | U41{\.___(48) | ('1'}(47) | 3 1(47) | ST(47) | G(47) | R"(47) | ?'I(47) | NY(47) | (N,(47) | ()(46) | 070(46) | 311(46) | õ(46) | L/(46) | 6/7/8{(46) | 135(45) | N/(45) | W)(45) | LL(45) | 3 5(44) | *&)(44) | PA!(44) | L&(44) | WY(43) | ;\\(43) | \M(43) | /\"(43) | 16(43) | 536(43) | (S(42) | $("Q(42) | 5(42) | ;??\(42) | YY(42) | I""?(42) | X(42) | \\'\\\(42) | -_(41) | G\(41) | \\/(40) | 7\(40) | @(40) | Q.(40) | 113(40) | &3\(40) | 8 51(39) | *7*'(39) | XN(38) | 63(38) | 6111(37) | '(37) | "\(37) | 44(37) | WYOL(37) | œ(36) | //"õ(36) | 3410(36) | I'(36) | ---(35) | LY(35) | %)(35) | ALY(35) | %(35) | L)(35) | D(34) | ..(34) | 15(34) | OL(33) | '\*"\(33) | '/(32) | B(32) | B~(32) | KG(32) | [(31) | 2 0(31) | 4   1  4 1(31) | 174  01 377(31) | L(30) | 1N(30) | A=(30)
+[PaddleOCR] 1546 ms, 10 satir:
+  Pamtime(100) | S-M(99) | code:317618(99) | Oysho Ispanyol takim(96) | Oysho Ispanyol takim(96) | Oysho Ispanyol takim(95) | cep yok(95) | cep yok(93) | g6:e\8\a(85) | c6bAoK(74)
+
+=========== sample3.jpg ===========
+Estimating resolution as 578
+Estimating resolution as 578
+Estimating resolution as 578
+Estimating resolution as 578
+Estimating resolution as 704
+Image too small to scale!! (2x36 vs min width of 3)
+Line cannot be recognized!!
+Estimating resolution as 704
+Estimating resolution as 704
+Image too small to scale!! (2x36 vs min width of 3)
+Line cannot be recognized!!
+Estimating resolution as 704
+Estimating resolution as 648
+Detected 118 diacritics
+Estimating resolution as 648
+Estimating resolution as 648
+Detected 118 diacritics
+Estimating resolution as 648
+Estimating resolution as 863
+Estimating resolution as 863
+Estimating resolution as 863
+Estimating resolution as 863
+Estimating resolution as 1904
+Estimating resolution as 1904
+Estimating resolution as 1904
+Estimating resolution as 1904
+Estimating resolution as 2006
+Estimating resolution as 2006
+Estimating resolution as 2006
+Estimating resolution as 2006
+Estimating resolution as 1713
+Estimating resolution as 1713
+Estimating resolution as 1713
+Estimating resolution as 1713
+Estimating resolution as 1219
+Estimating resolution as 1219
+Estimating resolution as 1219
+Estimating resolution as 1219
+Estimating resolution as 961
+Detected 7 diacritics
+Estimating resolution as 961
+Estimating resolution as 961
+Detected 7 diacritics
+Estimating resolution as 961
+Estimating resolution as 1229
+Estimating resolution as 1229
+Detected 58 diacritics
+Estimating resolution as 1229
+Estimating resolution as 1229
+Detected 58 diacritics
+[Tesseract] 20442 ms, 189 token (conf>=30):
+  1384(97) | -(96) | ?(95) | \(93) | MONTHS(92) | BABY(91) | |(91) | -12-18-24(90) | .(90) | 6-12-18-24(88) | -(87) | ](86) | [(86) | 4(85) | /(84) | 3(80) | %(79) | X(79) | IL(78) | A(78) | D(78) | =(78) | /4(76) | ....(74) | =JP|(73) | -..(72) | RGPOTIU.(71) | <Y(71) | .R.J(71) | RGPOTIU(71) | \\(70) | O(70) | /]L(69) | //1'(69) | I(68) | /7(68) | ~-(68) | t(68) | ©(68) | ~(68) | /6(67) | V(67) | V.-S"'(67) | 'P(67) | 0(67) | \\..N(66) | F"\(66) | R(66) | (_J'ø-(66) | 7\(65) | ~\(65) | C(65) | '.(65) | 1(64) | 'X(64) | //(64) | "ITU..L(64) | :'Q(63) | FAGT(62) | R'V(62) | LUUI"(62) | -'V(62) | LF(61) | :(61) | 'FMUL(61) | P(61) | '\9õ*F(61) | ';I(60) | '-!(60) | 7(60) | @(60) | ).,..F\.(59) | '?'(59) | /:L(59) | C"*"(59) | NN(59) | V_/'(59) | )(58) | 052(58) | ?S(58) | U~~(58) | /'J(58) | 11(58) | _,-'"'(58) | U\S"'BI'{(57) | Q(57) | S(57) | "S"'(57) | )11)-'|(56) | 1)(56) | %/'Z/(56) | IT'(55) | /-(55) | '"-'/(54) | W|(54) | '\(54) | \%(54) | F'-'-\(54) | %).(54) | 92(54) | '(54) | O\(54) | S\(53) | P,(53) | ½(53) | (_J'(53) | L](52) | 131(51) | VAV(51) | 397(51) | ?%(51) | "\:'(50) | '?\(50) | %%'(50) | 5(50) | -3(50) | 539(50) | |1(50) | 2(49) | AN(49) | 72(49) | =Y(49) | '."?(49) | LGPFL\(48) | LAYL(48) | N7(48) | -*L.(48) | 199(48) | {I(47) | .49'((47) | 99(47) | //YIVH\(47) | E(47) | 61(47) | -K(47) | 'JF?"(47) | J\(46) | "(46) | C:)'S\(46) | 41 4(46) | G%(45) | /)(45) | H'?'(45) | L*(45) | T(45) | 33(44) | 56(44) | 1137(44) | 141(44) | AY(43) | G(42) | *??'(42) | O,(42) | TLEE(41) | 310(41) | 136(40) | Z](40) | GY(39) | (T(39) | 7 2(39) | 1 3(39) | F\(39) | "/D'(38) | 74(37) | 9541(37) | AS?T""(36) | L(36) | 6(36) | 21(36) | 07(36) | 7 3(36) | (O(36) | SN(36) | .0(35) | OA(35) | {(34) | KE(34) | AL(33) | [T(33) | /L2(32) | ¯?V\(32) | W(32) | LS(32) | RL(32) | 41432  3   3(31) | 3   1(31) | 1 5 1(31) | K(30) | 2t(30)
+[PaddleOCR] 965 ms, 8 satir:
+  1384(100) | aporlu(99) | BABY(99) | FLAMINDO(99) | MONTHS/6-12-18-24(99) | an(70) | 1(17) | P(10)
+
+=========== sample4.jpg ===========
+Estimating resolution as 800
+Estimating resolution as 800
+Estimating resolution as 800
+Estimating resolution as 800
+Estimating resolution as 839
+Detected 21 diacritics
+Estimating resolution as 839
+Detected 21 diacritics
+Estimating resolution as 839
+Detected 21 diacritics
+Estimating resolution as 839
+Detected 21 diacritics
+Estimating resolution as 1279
+Estimating resolution as 1279
+Detected 21 diacritics
+Estimating resolution as 1279
+Estimating resolution as 1279
+Detected 21 diacritics
+Estimating resolution as 1439
+Estimating resolution as 1439
+Empty page!!
+Estimating resolution as 1439
+Estimating resolution as 1439
+Empty page!!
+Estimating resolution as 2234
+Estimating resolution as 2234
+Estimating resolution as 2234
+Estimating resolution as 2234
+Estimating resolution as 1984
+Estimating resolution as 1984
+Estimating resolution as 1984
+Estimating resolution as 1984
+Estimating resolution as 547
+Estimating resolution as 547
+Estimating resolution as 547
+Estimating resolution as 547
+Estimating resolution as 1437
+Estimating resolution as 1437
+Estimating resolution as 1437
+Estimating resolution as 1437
+Estimating resolution as 1897
+Estimating resolution as 1897
+Detected 17 diacritics
+Estimating resolution as 1897
+Estimating resolution as 1897
+Detected 17 diacritics
+Estimating resolution as 1460
+Estimating resolution as 1460
+Estimating resolution as 1460
+Estimating resolution as 1460
+[Tesseract] 17471 ms, 108 token (conf>=30):
+  1380(97) | 24(94) | MONTHS(93) | F(92) | BABY(91) | )(90) | \(90) | 6-12-18-24(90) | -(90) | |(87) | 3(87) | 1(87) | /(87) | O(87) | -(86) | W(86) | 4(85) | $(81) | ~(81) | RAPORLU(79) | #(78) | Y(77) | KAPORLU(74) | M(73) | RDPOTIU(73) | RCIPOTIU(73) | //(70) | .(68) | [(68) | 'P(68) | B(67) | 7(66) | ©)(66) | &(66) | A(65) | 9(64) | ½(64) | I(63) | R(63) | /7(63) | ¾(63) | 33(62) | "'(62) | TAGT(61) | 31(61) | N(60) | G(59) | ##;(59) | ;1(59) | TA?T(59) | 07(58) | 51(58) | TDYT(57) | !(57) | ,;',((57) | 41(55) | '(55) | OHD(55) | ,(55) | 11(54) | 110(54) | ®¯ZIP(54) | õ(53) | \"}}(53) | '*'(53) | {(53) | '#;(53) | '(53) | "A(52) | "L(51) | 'J(50) | '(49) | V(48) | ("-'(48) | ;(47) | =(47) | D(47) | FAYT(47) | 05(46) | RH-FT(46) | %(46) | P(45) | 6(44) | 'Y(44) | '-'.N-(43) | FAGT(43) | AN(43) | TY(43) | O)(42) | L(41) | 43(41) | -F(40) | &\(40) | 32   7(39) | 15(38) | 8(37) | %\M(37) | ½Y(36) | 2 1  3(36) | Q(35) | VAL(34) | (AN(34) | 5(33) | V](32) | 14(31) | '4(31) | '!(31) | FLYMI(31)
+[PaddleOCR] 1356 ms, 10 satir:
+  1380(100) | FLAMINDO(99) | BABY(99) | Raporlu(99) | Kabartma Vetay(92) | hp(72) | S-8r-sr-a\2HTOM(71) | -(38) | P(25) | A(15)
+
+=========== sample5.jpg ===========
+Estimating resolution as 560
+Detected 2 diacritics
+Estimating resolution as 560
+Estimating resolution as 560
+Detected 2 diacritics
+Estimating resolution as 560
+Estimating resolution as 665
+Estimating resolution as 665
+Estimating resolution as 665
+Estimating resolution as 665
+Estimating resolution as 1469
+Estimating resolution as 1469
+Detected 3 diacritics
+Estimating resolution as 1469
+Estimating resolution as 1469
+Detected 3 diacritics
+Estimating resolution as 850
+Estimating resolution as 850
+Estimating resolution as 850
+Estimating resolution as 850
+Estimating resolution as 661
+Estimating resolution as 661
+Estimating resolution as 661
+Estimating resolution as 661
+Estimating resolution as 1280
+Estimating resolution as 1280
+Estimating resolution as 1280
+Estimating resolution as 1280
+Estimating resolution as 1147
+Estimating resolution as 1147
+Estimating resolution as 1147
+Estimating resolution as 1147
+Estimating resolution as 2122
+Estimating resolution as 2122
+Estimating resolution as 2122
+Estimating resolution as 2122
+Estimating resolution as 1468
+Estimating resolution as 1468
+Estimating resolution as 1468
+Estimating resolution as 1468
+[Tesseract] 20715 ms, 162 token (conf>=30):
+  &(94) | AGE:2/3/4/5(93) | S-M(93) | CODE(92) | CODE:317617(92) | |(91) | PAMTIME(91) | ½(90) | TAKIM(90) | AGE(90) | '(90) | PAMT(90) | -(90) | 2/3/4/5(90) | .(89) | F(89) | \(89) | OYSHO(88) | 4(87) | Y(85) | -(84) | ¯(84) | %(83) | ®(83) | OYSH(82) | \)(81) | ¾(80) | 9(79) | 7(78) | P(78) | ~(78) | /\(77) | A(76) | @(76) | /(76) | ((75) | ,L(75) | /2(74) | W(73) | A4(73) | 1(73) | 0(72) | --KIDS(71) | D(70) | .L(70) | T(69) | N(69) | ](67) | L(67) | =(66) | 10(63) | MY(63) | N\(62) | AN(62) | 13611111311113(62) | 037511011310111(62) | S(61) | W,(61) | -'-.'(61) | D'"(60) | ¯)'9(60) | 11(60) | ((?(60) | \\'(59) | œ(59) | .'(((59) | %3(59) | 094(58) | L'F(57) | 344(57) | "N(57) | 1361111120718(56) | VV(56) | 31031(56) | -KIDS(56) | )(56) | 0]0(56) | -'T'(56) | '.(55) | '\(55) | 619(55) | '.ELFE-(55) | 17(54) | '{\(54) | 3(54) | 73(54) | OYSHOVTAKLM(53) | V(53) | OYSHO'TAKLM(53) | 844(53) | 6(53) | \'7\\(53) | \$(53) | 141(52) | -"(52) | X(52) | \L:\(51) | "(51) | '\\(51) | 2(50) | ".,'(50) | G(50) | 5  0(50) | A\J\\\(50) | \1(50) | \\(49) | "\(49) | \'\)\(48) | OYSH()'TAKLM(48) | \--/(48) | WI(48) | 5(47) | Y"'\(47) | 26(46) | ""\.},(46) | 79(46) | &10(46) | !(46) | HC}(46) | 63(45) | LY(45) | "11(45) | I(45) | _*'.'(44) | 4".(44) | 3;33\,(44) | OYSH\(;TAK1M(44) | RL(44) | Q'(43) | (7(43) | '®G[.(43) | I?(42) | N4(42) | 23(42) | <5(42) | OYSH?I(42) | [(42) | ===(42) | (/4(42) | I.'(41) | ø(41) | /),(40) | 037511311310111(40) | \"'(40) | Y/(39) | 25(39) | (S(39) | LO(38) | 01171(37) | /I(36) | 71   0(36) | ,(36) | 54(34) | /74(34) | B(33) | O(33) | QN(32) | T,(31) | E(31) | >(31) | OT(30) | --(30)
+[PaddleOCR] 1472 ms, 6 satir:
+  Pamtime(100) | KIDS(99) | code:317617(99) | W-S(91) | C\A\E\S:96(53) | Oeeo kee(30)
+
+=========== sample6.jpg ===========
+Estimating resolution as 546
+Estimating resolution as 546
+Estimating resolution as 546
+Estimating resolution as 546
+Estimating resolution as 752
+Estimating resolution as 752
+Estimating resolution as 752
+Estimating resolution as 752
+Estimating resolution as 1134
+Estimating resolution as 1134
+Estimating resolution as 1134
+Estimating resolution as 1134
+Estimating resolution as 949
+Estimating resolution as 949
+Estimating resolution as 949
+Estimating resolution as 949
+Estimating resolution as 641
+Estimating resolution as 641
+Estimating resolution as 641
+Estimating resolution as 641
+Estimating resolution as 1377
+Estimating resolution as 1377
+Estimating resolution as 1377
+Estimating resolution as 1377
+Estimating resolution as 850
+Estimating resolution as 850
+Estimating resolution as 850
+Estimating resolution as 850
+Estimating resolution as 1686
+Estimating resolution as 1686
+Estimating resolution as 1686
+Estimating resolution as 1686
+Estimating resolution as 1728
+Estimating resolution as 1728
+Estimating resolution as 1728
+Estimating resolution as 1728
