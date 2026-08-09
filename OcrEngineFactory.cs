@@ -13,13 +13,13 @@ public static class OcrEngineFactory
     // girmiyordu, Excel'de karşılığı olsa bile karşılaştırmaya ulaşamıyordu).
     public const string CandidatePattern = @"\d{3,7}";
 
-    public static OcrEnginePool Create(int parallelism)
+    public static OcrEnginePool Create(int parallelism, int cacheCapacity = 4)
     {
         // PaddleOcrAll'ın altındaki native motor thread-affinity gerektiriyor (bkz.
         // PaddleScanOcr.cs dosya başı notu) -- N bağımsız örnek yerine TEK bir paylaşılan
         // QueuedPaddleOcrAll (consumerCount=parallelism adanmış thread) kurulur; havuzun
         // geri kalan yuvaları bu paylaşılan kuyruğa yönlendiren ince sarmalayıcılardır.
-        var owner = new PaddleScanOcr(LocalFullModels.EnglishV4, CandidatePattern, consumerCount: parallelism);
+        var owner = new PaddleScanOcr(LocalFullModels.EnglishV4, CandidatePattern, consumerCount: parallelism, cacheCapacity: cacheCapacity);
         var engines = new List<IOcrEngine>(parallelism) { owner };
         for (int i = 1; i < parallelism; i++)
             engines.Add(new PaddleScanOcr(owner));

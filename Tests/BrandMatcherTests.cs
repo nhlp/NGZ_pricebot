@@ -207,6 +207,46 @@ public class BrandMatcherTests
         Assert.Null(BrandMatcher.MatchFromOcrTokens(Tokens(("FLAM", 90f)), Brands).Brand);
     }
 
+    // ---- Marka önerisi (tahmin, SuggestBrandsFromOcrTokens) ----
+
+    [Fact]
+    public void Oneri_JenerikKelimeninBirebirOkunmasi_MarkayiOnerir()
+    {
+        // Gerçek vaka (2026-08-08): "DECO SPORT"un tek ayırt edici kelimesi "DECO" hiç
+        // okunamadı ama jenerik kelimesi "SPORT" görselde net (birebir) okunmuştu. Eski kod
+        // sadece ayırt edici kelimelere baktığı için bu markayı hiç önermiyordu.
+        var brands = new List<BrandMultiplier> { new("DS", "DECO SPORT", 100m) };
+        var suggestions = BrandMatcher.SuggestBrandsFromOcrTokens(Tokens(("SPORT", 90f)), brands);
+        Assert.Contains("DECO SPORT", suggestions);
+    }
+
+    [Fact]
+    public void Oneri_JenerikKelimeYaklasikOkunmus_Onerilmez()
+    {
+        // Jenerik kelimeler sadece neredeyse birebir okunduğunda kanıt sayılır — gevşek (ayırt
+        // edici kelimelerdeki gibi 0.4 oranlı) eşleşme yeterli değildir, aksi halde onlarca
+        // markada geçen bu kelimeler rastgele markaları öne çıkarır.
+        var brands = new List<BrandMultiplier> { new("DS", "DECO SPORT", 100m) };
+        var suggestions = BrandMatcher.SuggestBrandsFromOcrTokens(Tokens(("SPORY", 90f)), brands);
+        Assert.DoesNotContain("DECO SPORT", suggestions);
+    }
+
+    [Fact]
+    public void Oneri_CokluKelimeKaniti_TekKelimeKanitindanOnceSiralanir()
+    {
+        var brands = new List<BrandMultiplier>
+        {
+            new("DS", "DECO SPORT", 100m),   // DECO (ayırt edici) + SPORT (jenerik) — ikisi de eşleşir
+            new("SL", "SPORT LINE", 50m),    // sadece SPORT (jenerik) eşleşir, LINE hiç okunmadı
+        };
+        var suggestions = BrandMatcher.SuggestBrandsFromOcrTokens(
+            Tokens(("DECO", 80f), ("SPORT", 90f)), brands);
+
+        Assert.Contains("DECO SPORT", suggestions);
+        Assert.True(suggestions.IndexOf("DECO SPORT") < suggestions.IndexOf("SPORT LINE"),
+            "iki kelimesi de eşleşen marka, tek kelimesi eşleşen markadan önce sıralanmalı");
+    }
+
     // ---- Kullanıcı cevabı eşleştirme ----
 
     [Theory]

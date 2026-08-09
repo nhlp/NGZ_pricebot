@@ -73,7 +73,7 @@ Ne yapıyor:
 |----------------------------------------|--------------|
 | `PriceBot.Worker.exe`                  | Çalıştırılabilir dosya — servis bunu başlatacak |
 | `PriceBot.Worker.dll` + `.pdb`         | Asıl uygulama kodu |
-| `appsettings.json`                     | Nebim bağlantı dizesi + `ExtraRecipients` — **kurulumdan önce mutlaka kontrol et (bkz. adım 3)** |
+| `appsettings.json`                     | Nebim bağlantı dizesi — **kurulumdan önce mutlaka kontrol et (bkz. adım 3)** |
 | `tessdata\`                            | Tesseract OCR dil/eğitim dosyaları — **eksik olursa OCR çalışmaz**, tüm klasör kopyalanmalı |
 | `*.dll` (ClosedXML, SkiaSharp, Tesseract, Serilog, Microsoft.Data.SqlClient, Microsoft.Extensions.* vb.) | Bağımlılıklar, hepsi gerekli |
 | `x64\`, `x86\` klasörleri + kök dizindeki `libSkiaSharp.dll`, `de\`, `es\` vb. dil klasörleri | SkiaSharp/Tesseract'ın native DLL'leri ve uydu kaynak dosyaları (bu projede ayrı bir `runtimes\` alt klasörü **yok**, doğrudan kök dizine yayılıyorlar) — **hepsi mutlaka kopyalanmalı**, silinirse OCR/damgalama çalışmaz |
@@ -90,22 +90,17 @@ dosyasını aç:
 {
   "ConnectionStrings": {
     "Nebim": "Server=...;Database=...;User Id=...;Password=...;TrustServerCertificate=True;"
-  },
-  "ExtraRecipients": [
-    "905000000001",
-    "905000000002"
-  ]
+  }
 }
 ```
 
 - `ConnectionStrings:Nebim` — sunucudan erişilebilir olduğunu adım 1.3'te test ettiğin adres olmalı.
-- `ExtraRecipients` — şu an **placeholder test numaraları** var. Gerçek kullanıma geçmeden önce:
-  - Gerçek ek alıcı numarası yoksa **boş dizi** yap: `"ExtraRecipients": []`
-  - Varsa gerçek numaralarla değiştir (E.164 benzeri format, örn. `"905XXXXXXXXX"`).
-  - **Bu adımı atlarsan her işlenen görsel placeholder numaralara da gönderilmeye çalışılır** (muhtemelen
-    başarısız olur ama gereksiz istek/log kirliliği yaratır).
 - Bu dosya şifre içerdiği için **sunucuda dosya izinlerini kısıtla** (sadece servis hesabı ve
   yöneticiler okuyabilsin) ve dosyayı hiçbir yere (git, paylaşım, mail) gönderme.
+- 2026-08-08: `ExtraRecipients` özelliği hiç kullanılmadığı için koddan tamamen kaldırıldı — her işlenen
+  görsel artık her zaman sadece gönderen numaraya gider. Opsiyonel olarak `OcrParallelism`,
+  `OcrCacheCapacity`, `OcrRecycleHours` anahtarları eklenebilir (bkz. CLAUDE.md "OCR performansı") —
+  hiçbiri zorunlu değil, yoksa kod içi varsayılanlar kullanılır.
 
 ## 4. Dosyaları sunucuya taşı
 
@@ -185,8 +180,8 @@ sc.exe stop PriceBotWorker
 dotnet publish PriceBot.Worker.csproj -c Release -r win-x64 --self-contained false -o C:\PriceBot\Publish_yeni
 ```
 Yeni çıktıyı sunucudaki `C:\PriceBot\Publish\` üzerine kopyala (appsettings.json'ı ezmemeye dikkat et —
-sunucudaki gerçek `ExtraRecipients`/connection string sürümünü koru, sadece `.exe/.dll` ve native/dil
-klasörleri — `x64\`, `x86\`, `tessdata\` vb. — güncellensin), sonra:
+sunucudaki gerçek connection string sürümünü koru, sadece `.exe/.dll` ve native/dil klasörleri —
+`x64\`, `x86\`, `tessdata\` vb. — güncellensin), sonra:
 ```
 sc.exe start PriceBotWorker
 ```
