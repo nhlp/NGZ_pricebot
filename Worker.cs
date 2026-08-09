@@ -21,6 +21,14 @@ public class Worker : BackgroundService
     private static readonly HashSet<string> SupportedExtensions =
         new(StringComparer.OrdinalIgnoreCase) { ".jpg", ".jpeg", ".png", ".webp" };
 
+    /// <summary>Marka seçim listesinde (WhatsApp interaktif liste mesajı — bkz. bot_marka_secim_gorevi.md,
+    /// 2026-08-08) her zaman son satır olarak eklenir. Kullanıcı bunu seçerse bot, cevabı olduğu gibi
+    /// (bu sabit metin) marka_cevap.txt'ye yazar; bu metin HİÇBİR markayla eşleşmeyeceği için (bilinçli
+    /// olarak — BrandMatcher'a dokunmadan) mevcut "eşleşmedi -> tekrar sor" akışına düşer, ama
+    /// ResolveFolderBrandAsync bu özel metni tanıyıp tekrar soruyu listesiz/doğrudan serbest-metin
+    /// olarak sorar (kullanıcı zaten listeyi reddetmiş, tekrar liste sunmak gereksiz).</summary>
+    private const string OtherBrandOptionText = "Diğer (markayı kendim yazacağım)";
+
     private readonly ILogger<Worker> _logger;
 
     public Worker(ILogger<Worker> logger)
@@ -63,36 +71,158 @@ public class Worker : BackgroundService
         var appDir = AppContext.BaseDirectory;
         var config = JsonNode.Parse(File.ReadAllText(Path.Combine(appDir, "appsettings.json")))!;
         var nebimConnectionString = config["ConnectionStrings"]!["Nebim"]!.GetValue<string>();
-        var extraRecipients = config["ExtraRecipients"]?.AsArray().Select(n => n!.GetValue<string>()).ToList() ?? [];
         // "Paddle" (varsayılan) veya "Tesseract" — bkz. OcrEngineFactory. Olumsuz geri dönüş
-        // olursa appsettings.json'da "Tesseract" yazıp servisi yeniden başlatmak yeterlidir.
+        // olursa appsettings.json'da "Tesseract" yazıp servisi yeniden başlatmak yeterlidir;
+        // Tesseract tarafı (FullScanOcr.cs) hiç değiştirilmedi, kod değişikliği/yeniden derleme
+        // gerekmez.
         var ocrEngineName = config["OcrEngine"]?.GetValue<string>() ?? "Paddle";
         // Test amaçlı: true iken islendi.txt raporunun (Gönderim bölümü çıkarılmış, "DAMGALANDI"
         // yerine müşteriye yönelik "ETİKETLİ" etiketiyle) bir kopyası gönderen numaraya WhatsApp
         // metni olarak da gönderilir. Yayına geçmeden önce appsettings.json'da false yapılmalı.
         var sendReportToCustomer = config["SendReportToCustomer"]?.GetValue<bool>() ?? false;
 
+        // İYİ KOMŞU AYARI (2026-08-09): sunucu paylaşımlı (SQL Server + IIS + RDP aynı makinede) ve
+        // 65 görsellik gibi büyük klasörler CPU'yu üretimde canlı olarak %96-100'e çıkarabiliyor.
+        // Bu tek başına sunucuyu ÇÖKERTMEZ (Windows'ta CPU doygunluğu "yumuşak" bir yavaşlamadır,
+        // bellek tükenmesi gibi "sert" bir kararsızlık değil) ama paylaşılan SQL Server sorgularını/
+        // bot'un IIS isteklerini geciktirebilir. Process önceliğini BelowNormal'a çekmek, Windows
+        // zamanlayıcısına "boştaysan istediğin kadar CPU kullan, ama SQL/IIS gerçekten CPU isterse
+        // önce ona ver" dedirtiyor — iş boşta değilken hiçbir verim kaybı yok, sadece gerçek çakışma
+        // anında geri çekiliyor. appsettings.json'da "OcrProcessPriority" ile ("Normal", "High" vb.
+        // — bkz. System.Diagnostics.ProcessPriorityClass) override edilebilir; geçersiz/eksikse
+        // BelowNormal varsayılan.
+        var priorityConfigValue = config["OcrProcessPriority"]?.GetValue<string>();
+        var ocrProcessPriority = Enum.TryParse<ProcessPriorityClass>(priorityConfigValue, ignoreCase: true, out var parsedPriority)
+            ? parsedPriority
+            : ProcessPriorityClass.BelowNormal;
+        try
+        {
+            Process.GetCurrentProcess().PriorityClass = ocrProcessPriority;
+            _logger.LogInformation("Process önceliği ayarlandı: {Priority}", ocrProcessPriority);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Process önceliği ayarlanamadı (varsayılan Normal ile devam ediliyor) — zararsız.");
+        }
+
         using var http = new HttpClient();
         var rateProvider = new NebimRateProvider(nebimConnectionString, _logger);
         var brandProvider = new NebimBrandProvider(nebimConnectionString, _logger);
 
-        // TesseractEngine thread-safe değil; görseller, başlangıçta bir kez kurulan sabit
-        // boyutlu bir motor havuzuyla paralel taranır (motor kurulumu pahalı olduğu için
-        // görsel başına değil, servis ömrü boyunca aynı örnekler kullanılır). Bir çekirdek
-        // sistemin geri kalanına (bot, SQL) bırakılır; bellek için 6 örnekle sınırlanır.
-        var ocrParallelism = Math.Clamp(Environment.ProcessorCount - 1, 1, 6);
-        // Alt sınır 3: bazı fiyat listeleri 3 haneli ürün kodu kullanıyor (gerçek vaka,
-        // BABY Hi 2026-08-03: "473" gibi kodlar 4 haneli varsayımıyla aday listesine hiç
-        // girmiyordu, Excel'de karşılığı olsa bile karşılaştırmaya ulaşamıyordu).
-        using var ocrPool = OcrEngineFactory.Create(ocrEngineName, Path.Combine(appDir, "tessdata"), ocrParallelism);
+        // "OcrEngine" appsettings.json'dan "Paddle" (varsayılan) veya "Tesseract" olabilir (bkz.
+        // OcrEngineFactory). Tesseract seçiliyken motorlar thread-safe olmadığı için havuzdaki
+        // her yuva bağımsız bir TesseractEngine örneğidir; Paddle seçiliyken (native motor
+        // thread-affinity gerektirdiği için) tek bir paylaşılan QueuedPaddleOcrAll'ın adanmış
+        // thread'leri üzerinden paralel taranır (bkz. PaddleScanOcr.cs). Motor kurulumu pahalı
+        // olduğu için görsel başına değil, servis ömrü boyunca aynı örnekler kullanılır.
+        //
+        // 2026-08-08 DÜŞÜRÜLDÜ: eski `ProcessorCount-1` (üst sınır 6) formülü, sunucunun 8 vCPU
+        // olduğu varsayımıyla kalibre edilmişti (CLAUDE.md, 2026-07-28 teyitli) — ama üretim
+        // sunucusu gerçekte 6 çekirdekli ve SQL Server + IIS ile PAYLAŞILIYOR (canlı Görev
+        // Yöneticisi'nde teyit edildi, 2026-08-08). 6 çekirdekte eski formül 5 adanmış Paddle
+        // thread'i açıp diğer servislere tek çekirdek bırakıyordu; her adanmış örnek kendi
+        // model+kernel-cache belleğini taşıdığı için (bkz. PaddleScanOcr.cs bellek notu) bu aynı
+        // zamanda servisi yeniden 23 GB/%95 belleğe çıkardı. Yeni varsayılan çekirdeklerin
+        // YARISINI (üst sınır 3) kullanır, diğer yarısını SQL/IIS/OS'a bırakır. Rebuild
+        // gerektirmeden ince ayar için appsettings.json'a "OcrParallelism" / "OcrCacheCapacity"
+        // eklenebilir (sadece servis yeniden başlatılması yeterli).
+        var defaultOcrParallelism = Math.Clamp(Environment.ProcessorCount / 2, 1, 3);
+        var ocrParallelism = config["OcrParallelism"]?.GetValue<int>() ?? defaultOcrParallelism;
+        var ocrCacheCapacity = config["OcrCacheCapacity"]?.GetValue<int>() ?? 4;
+        // PERİYODİK YENİLEME (2026-08-08): parallelism/cacheCapacity düşürülmesine rağmen üretimde
+        // bellek büyümeye devam ediyor (6.5GB -> 8.3GB, aynı restart içinde) — bu artık oversubscription
+        // değil, PaddleInference'ın kendi native belleği (Scope tabanlı ayırıcı, en büyük görülen
+        // tensör/batch boyutuna göre "yüksek su işareti" tutuyor, otomatik küçülmüyor; bkz.
+        // `PaddlePredictor.TryShrinkMemory`/`ClearIntermediateTensor` kütüphanede var ama
+        // Sdcb.PaddleOCR bunları sarmalayıp DIŞARI vermiyor — `PaddleOcrDetector/Recognizer/
+        // Classifier._p` private). Kütüphaneyi yamalayamadığımız için elimizdeki tek temiz araç,
+        // tüm havuzu (QueuedPaddleOcrAll + altındaki native PaddlePredictor'lar dahil) periyodik
+        // olarak Dispose edip SIFIRDAN kurmak — native tarafın tamamen yıkılıp yeniden kurulması
+        // "yüksek su işaretini" native düzeyde gerçekten sıfırlar. Yenileme SADECE dış while
+        // döngüsünün başında (bir klasör turu bitmişken, hiçbir Parallel.For çalışmıyorken) olur,
+        // bu yüzden thread-safety sorunu yok. Maliyet düşük — dev makinede ölçüldü: OS dosya cache'i
+        // ısındıktan sonra 3 örneği paralel kurmak ~2 sn (ilk/soğuk kurulum ~9 sn), 10 sn'lik tarama
+        // döngüsü içinde ihmal edilebilir. İki bağımsız tetikleyici var (biri yeter):
+        // (1) OcrRecycleHours süresi dolması (varsayılan 1 saat — maliyet düşük olduğu için sık
+        //     tutuldu), (2) OcrRecycleMemoryMb eşiği — Task Manager'da görülenle AYNI metrik
+        //     (Process.WorkingSet64), büyüme hızı öngörülenden farklı çıkarsa saatlik zamanlayıcıyı
+        //     beklemeden tepki verir. İkisi de appsettings.json'dan ayarlanabilir (rebuild gerekmez);
+        //     <= 0 verilirse ilgili tetikleyici kapanır.
+        var ocrRecycleHours = config["OcrRecycleHours"]?.GetValue<double>() ?? 1.0;
+        // 2GB (2026-08-08, kullanıcı geri bildirimi): yenileme neredeyse bedavaya geldiği için
+        // ("düşük maliyet" yukarıdaki not) eşiği yüksek tutmanın faydası yok — mümkün olduğunca
+        // düşük tutup sunucuyu sürekli düşük bellek baskısında bırakmak tercih edildi. 6GB (ilk
+        // seçilen değer) "felakete yakınken müdahale et" gibiydi; 2GB, taze kurulmuş 3 model
+        // örneğinin gerçek tabanının (muhtemelen ~1-1.5GB) üstünde bir tavan.
+        // Not: yenileme mekanizması PaddlePredictor'ın kendiliğinden küçülmeyen native "yüksek su
+        // işareti"ni hedef alıyor — Tesseract seçiliyken bu sorun yok (TesseractEngine böyle bir
+        // native tensör-cache tutmuyor), ama zararsız da olduğu için OcrEngine="Tesseract"
+        // seçiliyken de aynen çalışır (sadece gereksiz yere motorları yeniden kurar).
+        var ocrRecycleMemoryMb = config["OcrRecycleMemoryMb"]?.GetValue<long>() ?? 2048;
+        var ocrTessdataPath = Path.Combine(appDir, "tessdata");
+        var ocrPool = OcrEngineFactory.Create(ocrEngineName, ocrTessdataPath, ocrParallelism, ocrCacheCapacity);
+        var ocrPoolCreatedAt = DateTime.UtcNow;
 
-        _logger.LogInformation("PriceBot Worker başladı. IncomingRoot={IncomingRoot} BotSendUrl={BotSendUrl} ExtraRecipients={ExtraRecipients} OcrEngine={OcrEngine} OcrParalel={OcrParallelism} SendReportToCustomer={SendReportToCustomer}",
-            IncomingRoot, BotSendUrl, extraRecipients.Count == 0 ? "(boş)" : string.Join(", ", extraRecipients), ocrEngineName, ocrParallelism, sendReportToCustomer);
+        _logger.LogInformation("PriceBot Worker başladı. IncomingRoot={IncomingRoot} BotSendUrl={BotSendUrl} OcrEngine={OcrEngine} OcrParalel={OcrParallelism} OcrCacheCapacity={OcrCacheCapacity} OcrRecycleHours={OcrRecycleHours} OcrRecycleMemoryMb={OcrRecycleMemoryMb} SendReportToCustomer={SendReportToCustomer}",
+            IncomingRoot, BotSendUrl, ocrEngineName, ocrParallelism, ocrCacheCapacity, ocrRecycleHours, ocrRecycleMemoryMb, sendReportToCustomer);
+
+        // 2026-08-09: Önceden bu kontrol SADECE dış while döngüsünün başında çalışıyordu — ama
+        // aşağıdaki `foreach (var folder in readyFolders)` birikmiş çok sayıda klasörü TEK bir turda
+        // (bir sonraki döngü başına dönmeden) art arda işliyor. Birikinti varsa (ör. servis birkaç kez
+        // yeniden başlatılıp test edilirken kuyruklanan klasörler) bu foreach saatlerce sürebilir ve
+        // yenileme hiç fırsat bulamadan bellek/CPU tavana çıkabilirdi (üretimde canlı gözlemlendi —
+        // CPU %96,8, bellek 7,1GB, 2GB eşiğinin üstünde ama yenileme tetiklenmemişti). Çözüm: kontrolü
+        // yerel bir fonksiyona çıkarıp hem dış döngü başında HEM DE her klasörden önce çağırmak — böylece
+        // büyük bir birikinti işlenirken bile klasörler arasında düzenli olarak fırsat buluyor. Sadece
+        // klasör aralarında çağrıldığı için güvenlik aynı: hiçbir zaman bir Parallel.For'un ortasında
+        // tetiklenmiyor.
+        void TryRecycleOcrPool()
+        {
+            var elapsedSinceRecycle = DateTime.UtcNow - ocrPoolCreatedAt;
+            var workingSetMb = Process.GetCurrentProcess().WorkingSet64 / 1024 / 1024;
+            var recycleDueToTime = ocrRecycleHours > 0 && elapsedSinceRecycle >= TimeSpan.FromHours(ocrRecycleHours);
+            var recycleDueToMemory = ocrRecycleMemoryMb > 0 && workingSetMb >= ocrRecycleMemoryMb;
+            if (!recycleDueToTime && !recycleDueToMemory) return;
+
+            _logger.LogInformation(
+                "OCR motor havuzu yenileniyor (native bellek geri kazanımı için) — sebep: {Reason}, o anki çalışma belleği {WorkingSetMb} MB, son yenilemeden bu yana {Elapsed}.",
+                recycleDueToMemory ? $"bellek eşiği ({ocrRecycleMemoryMb} MB)" : $"zamanlayıcı ({ocrRecycleHours} sa)",
+                workingSetMb, elapsedSinceRecycle);
+            // Yenileme kendi try/catch'iyle izole: yeni havuz kurulumu başarısız olursa
+            // (ör. geçici dosya kilidi, bellek yetersizliği) eski havuz DOKUNULMADAN çalışmaya
+            // devam eder ve klasör işlemesi normal şekilde ilerler — dıştaki genel catch'e düşüp
+            // gereksiz yere atlanmaz. Başarısız kurulum bir sonraki fırsatta otomatik tekrar denenir,
+            // servis kesintiye uğramaz.
+            try
+            {
+                var newPool = OcrEngineFactory.Create(ocrEngineName, ocrTessdataPath, ocrParallelism, ocrCacheCapacity);
+                var oldPool = ocrPool;
+                ocrPool = newPool;
+                ocrPoolCreatedAt = DateTime.UtcNow;
+                try
+                {
+                    oldPool.Dispose();
+                }
+                catch (Exception disposeEx)
+                {
+                    // Yeni havuz zaten devrede ve sağlıklı — eski havuzun kapanışı başarısız
+                    // olsa bile servis etkilenmez, sadece bir miktar native bellek geri
+                    // kazanılamamış olabilir (zararsız, bir sonraki başarılı yenilemede düzelir).
+                    _logger.LogWarning(disposeEx, "Eski OCR havuzu kapatılırken hata oluştu (yeni havuz zaten devrede, servise zararı yok).");
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "OCR havuzu yenilenemedi — eski havuzla devam ediliyor, bir sonraki fırsatta tekrar denenecek.");
+            }
+        }
 
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
+                TryRecycleOcrPool();
+
                 if (!Directory.Exists(IncomingRoot))
                 {
                     _logger.LogWarning("IncomingRoot bulunamadı: {IncomingRoot}, 5 sn sonra tekrar denenecek.", IncomingRoot);
@@ -145,6 +275,11 @@ public class Worker : BackgroundService
 
                 foreach (var folder in readyFolders)
                 {
+                    // Birikmiş çok sayıda klasör varsa bu foreach uzun sürebilir — her klasörden
+                    // önce tekrar kontrol ederek yenilemenin dış döngü turunu beklemesini engelle
+                    // (bkz. TryRecycleOcrPool tanımındaki 2026-08-09 notu).
+                    TryRecycleOcrPool();
+
                     var stopwatch = Stopwatch.StartNew();
                     var processStart = DateTime.Now;
 
@@ -409,7 +544,9 @@ public class Worker : BackgroundService
                         }
                     }
 
-                    var recipients = new[] { senderPhone }.Concat(extraRecipients).Distinct().ToList();
+                    // 2026-08-08: ExtraRecipients kaldırıldı (kullanılmıyordu) — alıcı artık her zaman
+                    // sadece gönderen numara.
+                    var recipients = new List<string> { senderPhone };
                     var sendResults = new List<SendResult>();
                     var stillPending = new List<PendingSend>();
 
@@ -440,7 +577,8 @@ public class Worker : BackgroundService
 
                     if (sendReportToCustomer)
                     {
-                        var customerReport = BuildCustomerFacingReport(report);
+                        var customerReport = BuildCustomerFacingReport(
+                            folder, brand, rate.Value.Rate, allFiles.Count, imageResults, sendResults, stopwatch.Elapsed);
                         var reportSend = await TrySendTextAsync(http, customerReport, senderPhone, stoppingToken);
                         if (!reportSend.Success)
                         {
@@ -485,6 +623,7 @@ public class Worker : BackgroundService
             }
         }
 
+        ocrPool.Dispose();
         _logger.LogInformation("PriceBot Worker durduruluyor.");
     }
 
@@ -528,13 +667,28 @@ public class Worker : BackgroundService
             File.Move(answerPath, Path.Combine(folder, $"marka_cevap_red_{DateTime.Now:yyyyMMdd_HHmmss}.txt"), overwrite: true);
             File.Delete(questionPath);
 
-            var suggestionText = outcome.Suggestions.Count > 0
-                ? $" Şunlardan birini mi kastettiniz: {string.Join(", ", outcome.Suggestions)}?"
-                : "";
-            var retryQuestion = $"PriceBot: '{answerText}' marka listesinde bulunamadı.{suggestionText} Lütfen '{excelName}' listesindeki ürünler için markanın tam adını tek mesaj olarak tekrar yazınız.";
+            // Kullanıcı bir önceki listede "Diğer"i seçmişti (bkz. OtherBrandOptionText) — tekrar
+            // liste sunmak anlamsız (zaten reddetti), doğrudan serbest metin iste, "listede
+            // bulunamadı" çerçevelemesi de kafa karıştırıcı olurdu ("Diğer" zaten bir marka adı
+            // değil), o yüzden atlanır.
+            string retryQuestion;
+            List<string>? retryOptions;
+            if (string.Equals(answerText, OtherBrandOptionText, StringComparison.OrdinalIgnoreCase))
+            {
+                retryQuestion = $"PriceBot: '{excelName}' listesindeki ürünler için markanın tam adını tek mesaj olarak yazınız (örnek: LİLAX).";
+                retryOptions = null;
+            }
+            else
+            {
+                var suggestionText = outcome.Suggestions.Count > 0
+                    ? $" Şunlardan birini mi kastettiniz: {string.Join(", ", outcome.Suggestions)}? Bunlardan biri doğruysa onu yazabilir, değilse markanın tam adını tekrar yazabilirsiniz."
+                    : $" Lütfen '{excelName}' listesindeki ürünler için markanın tam adını tek mesaj olarak tekrar yazınız.";
+                retryQuestion = $"PriceBot: '{answerText}' marka listesinde bulunamadı.{suggestionText}";
+                retryOptions = outcome.Suggestions.Count > 0 ? [.. outcome.Suggestions, OtherBrandOptionText] : null;
+            }
             _logger.LogWarning("Klasör {Folder}: marka cevabı '{Answer}' listeyle eşleşmedi, tekrar sorulacak. Öneriler: {Suggestions}",
                 folder, answerText, outcome.Suggestions.Count == 0 ? "(yok)" : string.Join(", ", outcome.Suggestions));
-            await SendBrandQuestionAsync(http, folder, senderPhone, questionPath, retryQuestion, ct);
+            await SendBrandQuestionAsync(http, folder, senderPhone, questionPath, retryQuestion, retryOptions, ct);
             return null;
         }
 
@@ -606,29 +760,42 @@ public class Worker : BackgroundService
         // birden fazla soru düşebilir; kullanıcı hangi sorunun hangi listeye ait olduğunu kendi
         // gönderdiği dosyanın adından ayırt eder. Bot, cevabı her zaman en eski bekleyen klasöre
         // yazdığı için soruların ve cevapların sırası eşleşir (bkz. bot_marka_cevap_gorevi.md).
-        // Kesin/yaklaşık eşleşme yok, ama OCR token'ları listedeki bazı markalara yakın
-        // düşüyor olabilir (kesik/hatalı okuma) — kullanıcıya ilk soruda "tahmin" olarak
-        // sunulur, doğruysa bir tur (retry sorusu) atlanmış olur.
-        var firstGuesses = BrandMatcher.SuggestBrandsFromOcrTokens(unionTokens, brandList);
-        var guessText = firstGuesses.Count > 0
-            ? $" Şunlardan biri olabilir mi: {string.Join(", ", firstGuesses)}?"
+        // Seçenek listesi önceliği: OCR'ın çelişkili biçimde eşleştirdiği markalar (ocrOutcome.
+        // AmbiguousNames — bunlar kesin OCR kanıtına dayanır, sadece NetCarpan çakışması yüzünden
+        // otomatik karar verilemedi) varsa ONLAR sunulur; yoksa (hiç eşleşme yok) daha zayıf
+        // Levenshtein-yakınlık tahminleri (SuggestBrandsFromOcrTokens) kullanılır. Her iki durumda
+        // da listeye "Diğer" eklenir (bkz. OtherBrandOptionText) ki kullanıcı hiçbiri değilse kendi
+        // yazabilsin — bkz. bot_marka_secim_gorevi.md (WhatsApp interaktif liste mesajı sözleşmesi).
+        var candidateOptions = ocrOutcome.AmbiguousNames.Count > 0
+            ? ocrOutcome.AmbiguousNames
+            : BrandMatcher.SuggestBrandsFromOcrTokens(unionTokens, brandList);
+        var hasOptions = candidateOptions.Count > 0;
+        var guessText = hasOptions
+            ? $" Şunlardan biri olabilir mi: {string.Join(", ", candidateOptions)}?"
             : "";
+        var tail = hasOptions
+            ? " Bunlardan biri doğruysa onu yazabilir, değilse markanın tam adını yazabilirsiniz."
+            : " Markanın tam adını tek mesaj olarak yazınız (örnek: LİLAX).";
         var question = "PriceBot: Gönderdiğiniz fotoğraflardaki ürünlerin markası otomatik tespit edilemedi " +
-                       $"('{excelName}' listesindeki ürünler).{guessText} Değilse markanın tam adını tek mesaj olarak yazınız (örnek: LİLAX).";
-        if (firstGuesses.Count > 0)
-            _logger.LogInformation("Klasör {Folder}: marka bulunamadı, ilk soruya OCR-yakınlık tahminleri eklendi: {Guesses}",
-                folder, string.Join(", ", firstGuesses));
-        await SendBrandQuestionAsync(http, folder, senderPhone, questionPath, question, ct);
+                       $"('{excelName}' listesindeki ürünler).{guessText}{tail}";
+        var options = hasOptions ? candidateOptions.Append(OtherBrandOptionText).ToList() : null;
+        if (hasOptions)
+            _logger.LogInformation("Klasör {Folder}: marka bulunamadı, ilk soruya seçenekler eklendi ({Kaynak}): {Guesses}",
+                folder, ocrOutcome.AmbiguousNames.Count > 0 ? "çelişkili OCR eşleşmesi" : "yakınlık tahmini", string.Join(", ", candidateOptions));
+        await SendBrandQuestionAsync(http, folder, senderPhone, questionPath, question, options, ct);
         return null;
     }
 
     /// <summary>Marka sorusunu gönderene iletir ve BAŞARILIYSA marka_sorusu.txt işaretçisini
     /// yazar — klasör, bot cevabı marka_cevap.txt olarak yazana kadar taramalarda atlanır.
     /// Gönderim başarısızsa (örn. bot kapalı) işaretçi yazılmaz; klasör bir sonraki turda
-    /// baştan işlenir ve soru tekrar denenir.</summary>
-    private async Task SendBrandQuestionAsync(HttpClient http, string folder, string senderPhone, string questionPath, string question, CancellationToken ct)
+    /// baştan işlenir ve soru tekrar denenir.
+    /// <paramref name="options"/> doluysa (2026-08-08) bot'a WhatsApp interaktif liste mesajı
+    /// olarak göndermesi için iletilir (bkz. bot_marka_secim_gorevi.md) — null/boşsa eskisi gibi
+    /// sade metin sorusu gönderilir, davranış değişmez.</summary>
+    private async Task SendBrandQuestionAsync(HttpClient http, string folder, string senderPhone, string questionPath, string question, List<string>? options, CancellationToken ct)
     {
-        var result = await TrySendTextAsync(http, question, senderPhone, ct);
+        var result = await TrySendTextAsync(http, question, senderPhone, ct, options);
         if (!result.Success)
         {
             _logger.LogWarning("Klasör {Folder}: marka sorusu gönderilemedi ({Status}), bir sonraki turda tekrar denenecek.",
@@ -639,6 +806,7 @@ public class Worker : BackgroundService
         File.WriteAllText(questionPath,
             $"Gönderilme zamanı: {DateTime.Now:yyyy-MM-dd HH:mm:ss}{Environment.NewLine}" +
             $"Alıcı: {senderPhone}{Environment.NewLine}" +
+            (options is { Count: > 0 } ? $"Seçenekler: {string.Join(" | ", options)}{Environment.NewLine}" : "") +
             $"Soru: {question}{Environment.NewLine}",
             Encoding.UTF8);
         _logger.LogInformation("Klasör {Folder}: marka sorusu {Recipient} numarasına gönderildi, cevap bekleniyor.", folder, senderPhone);
@@ -646,10 +814,13 @@ public class Worker : BackgroundService
 
     /// <summary>Bot'a dosyasız düz metin mesaj gönderir (FilePath boş string). Bot tarafının
     /// boş FilePath'i "sadece metin gönder" olarak yorumlaması gerekir (bkz. CLAUDE.md'deki
-    /// bot sözleşmesi).</summary>
-    private async Task<SendResult> TrySendTextAsync(HttpClient http, string messageText, string recipient, CancellationToken ct)
+    /// bot sözleşmesi). <paramref name="options"/> (2026-08-08): doluysa JSON body'de "Options"
+    /// alanı olarak iletilir — bot bunu WhatsApp interaktif liste mesajına çevirebilir (bkz.
+    /// bot_marka_secim_gorevi.md); null ise alan null serileşir, bot'un mevcut sade-metin
+    /// davranışı DEĞİŞMEZ (geriye dönük uyumlu, opsiyonel alan).</summary>
+    private async Task<SendResult> TrySendTextAsync(HttpClient http, string messageText, string recipient, CancellationToken ct, List<string>? options = null)
     {
-        var body = JsonSerializer.Serialize(new { ToNumber = recipient, MessageText = messageText, FilePath = "" });
+        var body = JsonSerializer.Serialize(new { ToNumber = recipient, MessageText = messageText, FilePath = "", Options = options });
         try
         {
             var resp = await http.PostAsync(BotSendUrl, new StringContent(body, Encoding.UTF8, "application/json"), ct);
@@ -922,14 +1093,44 @@ public class Worker : BackgroundService
     /// kodları gibi iç detaylar) çıkarılır ve iç kullanım etiketi "DAMGALANDI" müşteriye yönelik
     /// "ETİKETLİ" ile değiştirilir ("DAMGALANDI-FUZZY, KONTROL ÖNERİLİR" -> "ETİKETLİ-FUZZY, KONTROL
     /// ÖNERİLİR" olur, kasıtlı). islendi.txt dosyasının kendisi bu fonksiyondan etkilenmez.</summary>
-    private static string BuildCustomerFacingReport(string fullReport)
+    // 2026-08-09: Müşteriye giden metin artık tam raporun kısaltılmış hâli DEĞİL, baştan sona
+    // ayrı ve kısa bir özet — sadece gerçekten bilinmesi gereken şeyler: kaç görsel fiyatlandı,
+    // kaçı neden atlandı/hata aldı, hangi marka/kurla hesaplandı. Fiyatlandırılan her görselin
+    // kod/fiyat dökümü BİLEREK yok — müşteri zaten o görselleri fiyat damgalı olarak ayrıca
+    // alıyor, aynı bilgiyi ikinci kez metinle okumasına gerek yok. Önceki tasarım (tam raporu
+    // "--- Görseller ---" bölümünden kısaltarak üretmek) büyük klasörlerde (65 görsel) hâlâ
+    // WhatsApp'ın pratik metin sınırını (~4096 karakter) zorluyordu — üretimde canlı gözlemlendi
+    // (DECO SPORT: bot "OK" döndürdü ama müşteriye hiçbir şey ulaşmadı). Bu tasarım klasör
+    // büyüklüğünden bağımsız olarak sabit/kısa kalır (en fazla `CustomerReportMaxSkippedListed`
+    // atlanan satırı listelenir, gerisi sayıyla özetlenir).
+    private const int CustomerReportMaxSkippedListed = 15;
+
+    private static string BuildCustomerFacingReport(
+        string folder, BrandMultiplier brand, decimal rateValue, int totalImages,
+        List<ImageResult> imageResults, List<SendResult> sendResults, TimeSpan duration)
     {
-        var start = fullReport.IndexOf("--- Gönderim (al", StringComparison.Ordinal);
-        var end = fullReport.IndexOf("--- Özet ---", StringComparison.Ordinal);
-        var trimmed = (start >= 0 && end > start)
-            ? fullReport.Remove(start, end - start)
-            : fullReport;
-        return trimmed.Replace("DAMGALANDI", "ETİKETLİ", StringComparison.Ordinal);
+        var matchedCount = imageResults.Count(r => r.OutputFileName is not null);
+        var skipped = imageResults.Where(r => r.OutputFileName is null).ToList();
+        var sentOk = sendResults.Count(s => s.Success);
+
+        var sb = new StringBuilder();
+        sb.AppendLine("=== PriceBot Raporu ===");
+        sb.AppendLine($"Klasör: {Path.GetFileName(folder)}");
+        sb.AppendLine($"Marka: {brand.FullName}  |  Kur: 1 USD = {rateValue} TRY  |  Süre: {duration.TotalSeconds:N0} sn");
+        sb.AppendLine();
+        sb.AppendLine($"Toplam görsel: {totalImages}  |  Fiyatlandırılan: {matchedCount}  |  Atlanan/Hatalı: {skipped.Count}  |  Gönderilen: {sentOk}/{sendResults.Count}");
+
+        if (skipped.Count > 0)
+        {
+            sb.AppendLine();
+            sb.AppendLine("Fiyatlandırılamayanlar:");
+            foreach (var r in skipped.Take(CustomerReportMaxSkippedListed))
+                sb.AppendLine($"- {r.FileName}: {r.SkipOrErrorReason}");
+            if (skipped.Count > CustomerReportMaxSkippedListed)
+                sb.AppendLine($"... ve {skipped.Count - CustomerReportMaxSkippedListed} tane daha (tam döküm için islendi.txt'ye bakınız)");
+        }
+
+        return sb.ToString();
     }
 
     private static string BuildReport(

@@ -12,8 +12,14 @@
 // Aday çıkarma/eşleştirme (ExtractCandidates, MatchExact, ComputeFuzzyCandidates, yaş-aralığı v11
 // tie-break, Levenshtein) FullScanOcr.cs'teki (v9-v11, kanıtlanmış) algoritmayla BİREBİR aynıdır —
 // motor bağımsız oldukları için kasıtlı olarak buraya kopyalandı, FullScanOcr.cs'e HİÇ dokunulmadı.
-// Amaç: appsettings.json'da "OcrEngine": "Tesseract" yazıp servisi yeniden başlatarak eski motora
-// dönüşün risksiz/garantili olması — Tesseract tarafında satır bazında hiçbir değişiklik yok.
+// Amaç buydu: appsettings.json'da "OcrEngine": "Tesseract" yazıp servisi yeniden başlatarak eski
+// motora risksiz dönüş. 2026-08-08 DÜZELTME: bu geri dönüş yolu artık ÇALIŞMIYOR — Tesseract
+// dosyaları (FullScanOcr.cs dahil) `375f080`'de tamamen silindi ve Worker.cs'in "OcrEngine" config
+// okuma/motor seçme kodu da onunla birlikte kaldırıldı (bu yorum satırı unutulmuştu, güncellenmedi).
+// appsettings.json'da hâlâ bir "OcrEngine" anahtarı görürseniz (üretimde "Paddle" olarak bulundu,
+// 2026-08-08) o dönemden kalma ÖLÜ bir alandır, hiçbir kod okumuyor — silinmesi zararsızdır. Gerçek
+// bir Tesseract'a dönüş gerekirse `git checkout checkpoint/dual-ocr-engines` ile o dönemki
+// Worker.cs/OcrEngineFactory.cs'e bakılıp switch mantığı elle geri getirilmeli.
 //
 // EŞ ZAMANLILIK NOTU (2026-08-07, gerçek Worker koşusuyla bulundu): OcrEnginePool, Tesseract'ın
 // modeline göre (N bağımsız TesseractEngine, her biri kendi thread'inde) tasarlanmıştı — ama
@@ -79,19 +85,38 @@ public sealed class PaddleScanOcr : IOcrEngine
     /// (orijinal varsayılan 10'un altında, oversubscription düzeltildiği için güvenli, ama daha az
     /// cache-miss/yeniden derleme).
     ///
-    /// HIZ DENEMESİ (2026-08-07, kullanıcı onayıyla): `Enable180Classification: false` — algılanan HER
-    /// metin kutusu için ayrı bir "180° döndürülmüş mü?" sınıflandırma modeli geçişini atlar (kutu
-    /// sayısıyla orantılı gerçek bir hız kazancı). Risk: bir görsel gerçekten baş aşağı gelirse o
-    /// metin ters okunur/okunamaz — ürün fotoğrafları WhatsApp'tan geldiği için teorik olarak mümkün.
-    /// Kullanıcı riski kabul ederek denemeyi istedi; gerçek klasörlerle kod okuma oranı DÜŞERSE
-    /// (özellikle ters/yan çekilmiş fotoğraflarda kod kaçırma artarsa) true'ya geri alınmalı.</summary>
-    public PaddleScanOcr(FullOcrModel model, string candidatePattern, int consumerCount)
+    /// HIZ DENEMESİ (2026-08-07, kullanıcı onayıyla) — 2026-08-08'de GERİ ALINDI: `Enable180Classification:
+    /// false` algılanan HER metin kutusu için ayrı bir "180° döndürülmüş mü?" sınıflandırma modeli
+    /// geçişini atlıyordu (kutu sayısıyla orantılı gerçek bir hız kazancı vardı). Gerçek DECO KIDS WEAR
+    /// klasörüyle (testFto3, 65 görsel) doğrulanan vaka: yoğun çok-panelli katalog görsellerinde kalın/
+    /// kompakt stil-numarası kutuları ("27-958" gibi) DB algılama aşamasında bazen 180° ters açıyla
+    /// tespit ediliyor — bu, görselin kendisinin ters olmasıyla İLGİLİ DEĞİL, o tek kutunun en/boy
+    /// oranı yüzünden algılayıcının açı kararı belirsiz kalması. Sınıflandırma kapalıyken bu ters
+    /// kutu düzeltilmeden tanıyıcıya gidiyor ve tutarlı biçimde yanlış okunuyor ("27-948" → "846-4Z"/
+    /// "846-28" gibi, %78-93 güvenle — YANLIŞ ama YÜKSEK güvenli, bu yüzden sessizce yanlış kod
+    /// eşleşmesi riski de var). 3/3 örnek görselde Enable180Classification=true ile kod okuma
+    /// %99-100 güvenle DOĞRU çıktı (bkz. deney: reflect_probe, scratchpad). Bu tam olarak yukarıdaki
+    /// notun öngördüğü geri alma koşuluydu ("gerçek klasörlerle kod okuma oranı DÜŞERSE... true'ya
+    /// geri alınmalı") — sadece "ters çekilmiş fotoğraf" değil, "tek kutu açı belirsizliği" olarak
+    /// gerçekleşti. Hız kaybı kabul edilebilir bulundu (bkz. Worker.cs OCR loglarındaki görsel başına
+    /// süre); tekrar denenmek istenirse bu not ve commit mesajı başlangıç noktası olsun.
+    ///
+    /// cacheCapacity GERİ DÜŞÜRÜLDÜ (2026-08-08): üretim sunucusunun gerçekte 8 değil **6 çekirdekli**
+    /// olduğu ve SQL Server/IIS ile PAYLAŞILDIĞI anlaşıldı (CLAUDE.md'deki "8 vCPU, 2026-07-28 teyit"
+    /// notu güncel değilmiş ya da sunucu değişmiş). 6 çekirdekte eski `ProcessorCount-1` formülü 5
+    /// adanmış örnek açıyordu; 5 örnek × cacheCapacity 8 = 40 kernel-cache yuvası, üretimde servis
+    /// yeniden 23 GB/%95 belleğe çıktığı (aynı, ilk şikayetteki rakam) canlı olarak gözlemlendi —
+    /// yani "asıl neden thread sayısıydı, cache payı küçük" varsayımı (yukarıdaki HIZ NOTU) hatalıydı
+    /// ya da en azından tek başına yeterli değildi. `consumerCount` artık Worker.cs'te daha düşük
+    /// (paylaşılan/az çekirdekli sunucuya göre), `cacheCapacity` da parametre yapılıp varsayılanı
+    /// düşürüldü — appsettings.json'daki "OcrCacheCapacity" ile rebuild gerektirmeden ayarlanabilir.</summary>
+    public PaddleScanOcr(FullOcrModel model, string candidatePattern, int consumerCount, int cacheCapacity = 4)
     {
         _queue = new QueuedPaddleOcrAll(
-            () => new PaddleOcrAll(model, PaddleDevice.Mkldnn(cacheCapacity: 8, cpuMathThreadCount: 1))
+            () => new PaddleOcrAll(model, PaddleDevice.Mkldnn(cacheCapacity: cacheCapacity, cpuMathThreadCount: 1))
             {
                 AllowRotateDetection = true,
-                Enable180Classification = false,
+                Enable180Classification = true,
                 Detector = { MaxSize = 1600 },
             },
             consumerCount: consumerCount);
@@ -225,11 +250,29 @@ public sealed class PaddleScanOcr : IOcrEngine
     /// (Excel'de GERÇEKTEN o tire'li değerde bir kod olması gerekir) zaten ihmal edilebilir.</summary>
     private static readonly Regex HyphenCandidate = new(@"\d{1,4}-\d{1,4}", RegexOptions.Compiled);
 
+    /// <summary>Tire'li kod hemen ardından başka bir rakam grubuyla (aynı OCR kutusuna birleşmiş
+    /// bir alt satır — ör. "26-347" rozetinin hemen altındaki "6-9-12-18 AY/MONTH" yaş aralığı)
+    /// boşluksuz bitişik gelirse `HyphenCandidate`'in açgözlü `\d{1,4}` grubu tire sonrasını
+    /// olması gerekenden fazla yutar: "26-3476-9-12-18" içinden TEK eşleşme olarak "26-3476"
+    /// çıkar, gerçek kod "26-347" hiç aday olmaz (gerçek vaka, 2026-08-09: DECO KIDS WEAR ürün
+    /// fotoğrafı, Excel'de "26-347" varken hiçbir görsel eşleşmedi). Çözüm: `Matches` ile TÜM
+    /// tire'li eşleşmeleri gez ve tire sonrası rakam grubunun her ÖNEKİNİ de ayrı bir aday olarak
+    /// ekle ("26-3", "26-34", "26-347", "26-3476" gibi) — hangisinin gerçek kod olduğuna yine
+    /// MatchExact'ın Excel'e karşı tam-eşitlik kontrolü karar verir, burada sadece doğru önek de
+    /// aday havuzuna girsin diye fazladan olasılıklar üretiliyor.</summary>
     private static void TryExtractHyphen(string word, float conf, Dictionary<string, float> extracted)
     {
-        var m = HyphenCandidate.Match(word);
-        if (m.Success && (!extracted.TryGetValue(m.Value, out var best) || conf > best))
-            extracted[m.Value] = conf;
+        foreach (Match m in HyphenCandidate.Matches(word))
+        {
+            var dash = m.Value.IndexOf('-');
+            var tail = m.Value[(dash + 1)..];
+            for (int len = 1; len <= tail.Length; len++)
+            {
+                var candidate = m.Value[..(dash + 1 + len)];
+                if (!extracted.TryGetValue(candidate, out var best) || conf > best)
+                    extracted[candidate] = conf;
+            }
+        }
     }
 
     private void TryExtract(string word, float conf, Dictionary<string, float> extracted)
