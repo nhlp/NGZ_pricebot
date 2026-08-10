@@ -40,7 +40,7 @@ public class Worker : BackgroundService
     /// Excel koduna karşılık gelen aday bulunduğunda (ör. aynı görsel birden fazla yaş/beden
     /// grubunu temsil ediyorsa, 2026-08-xx vakası) artık en yüksek güvenli TEK aday seçilip
     /// diğerleri atılmıyor — hepsi ayrı ayrı fiyatlandırılıp görsele alt alta basılıyor.</summary>
-    private sealed record StampedCode(string Code, double Confidence, bool IsFuzzy, decimal PriceExcel, decimal PriceTry, decimal PriceUsd);
+    private sealed record StampedCode(string Code, double Confidence, bool IsFuzzy, decimal PriceExcel, decimal PriceTry, decimal PriceUsd, string Source = "OCR");
 
     private sealed record ImageResult(
         string FileName,
@@ -73,7 +73,9 @@ public class Worker : BackgroundService
         var nebimConnectionString = config["ConnectionStrings"]!["Nebim"]!.GetValue<string>();
         // Test amaçlı: true iken islendi.txt raporunun (Gönderim bölümü çıkarılmış, "DAMGALANDI"
         // yerine müşteriye yönelik "ETİKETLİ" etiketiyle) bir kopyası gönderen numaraya WhatsApp
-        // metni olarak da gönderilir. Yayına geçmeden önce appsettings.json'da false yapılmalı.
+        // metni olarak da gönderilir; aynı içerik WhatsApp gönderiminden bağımsız olarak (gönderim
+        // başarısız olsa bile) klasöre "musteri_raporu.txt" olarak da yazılır (2026-08-10) — kalıcı
+        // kayıt için. Yayına geçmeden önce appsettings.json'da false yapılmalı.
         var sendReportToCustomer = config["SendReportToCustomer"]?.GetValue<bool>() ?? false;
 
         // İYİ KOMŞU AYARI (2026-08-09): sunucu paylaşımlı (SQL Server + IIS + RDP aynı makinede) ve
@@ -103,6 +105,15 @@ public class Worker : BackgroundService
         using var http = new HttpClient();
         var rateProvider = new NebimRateProvider(nebimConnectionString, _logger);
         var brandProvider = new NebimBrandProvider(nebimConnectionString, _logger);
+
+        // Görü tabanlı marka tespiti fallback'i (2026-08-10) — bkz. GeminiBrandClassifier.cs
+        // dosya başı yorumu. GeminiApiKey boşsa (varsayılan) tamamen kapalı, hiçbir davranış
+        // değişmez; ResolveFolderBrandAsync'e OcrEnginePool gibi hep (null kontrolü olmadan)
+        // geçirilir.
+        var geminiApiKey = config["GeminiApiKey"]?.GetValue<string>() ?? "";
+        var geminiModel = config["GeminiBrandModel"]?.GetValue<string>() ?? "gemini-flash-latest";
+        var geminiFallbackModel = config["GeminiBrandModelFallback"]?.GetValue<string>() ?? "gemini-flash-lite-latest";
+        var geminiClassifier = new GeminiVisionClassifier(geminiApiKey, geminiModel, geminiFallbackModel, _logger);
 
         // PaddleOcrAll'ın altındaki native motor thread-affinity gerektirdiği için görseller
         // QueuedPaddleOcrAll'ın adanmış thread'leri üzerinden paralel taranır (bkz.
@@ -439,7 +450,7 @@ public class Worker : BackgroundService
                     // vermezse gönderene WhatsApp'tan marka sorulur ve klasör, bot cevabı
                     // marka_cevap.txt olarak yazana kadar bekletilir (islendi.txt yazılmaz).
                     var brandResolution = await ResolveFolderBrandAsync(
-                        http, folder, senderPhone, Path.GetFileName(excelFile), ocrPool, scans, brandList, excludedBrands, stoppingToken);
+                        http, folder, senderPhone, Path.GetFileName(excelFile), ocrPool, scans, brandList, excludedBrands, geminiClassifier, stoppingToken);
                     if (brandResolution is null) continue;
                     var (brand, brandSource) = brandResolution.Value;
                     _logger.LogInformation("Klasör markası: {Brand} (NetCarpan={Carpan}, kaynak: {Source})",
@@ -464,6 +475,13 @@ public class Worker : BackgroundService
                             chosen[idx] = scans[idx].Scan.Matches;
                     }
 
+                    // Klasör başına devre kesici (2026-08-10): bir kod tespiti Gemini API/ağ
+                    // hatasıyla (kota vb.) başarısız olursa, aynı duvara klasördeki HER görsel için
+                    // ayrı ayrı çarpmamak adına kalan görseller için Gemini kod tespiti atlanır —
+                    // sabit bir sayı sınırı yerine, hata görülene kadar dener, görülünce durur (bkz.
+                    // GeminiVisionClassifier.ClassifyCodeAsync dosya başı yorumu).
+                    var geminiCodeApiHealthy = true;
+
                     // Aşama 3: sonuçlara göre damgala/gönder.
                     for (int idx = 0; idx < scans.Count; idx++)
                     {
@@ -471,6 +489,32 @@ public class Worker : BackgroundService
                         var fileName = Path.GetFileName(file);
 
                         if (!chosen.TryGetValue(idx, out var matches))
+                        {
+                            // Son çare (2026-08-10): OCR bu görselde Excel kodlarından hiçbiriyle
+                            // eşleşen bir aday bulamadı. Marka fallback'inin aksine burada WhatsApp'a
+                            // soru YOK — kod, marka gibi klasör genelinde sabit değil, sorulacak tek
+                            // bir "doğru cevap" yok — tek çare Gemini'nin görü tespiti (o klasörün
+                            // Excel kod listesi kapalı liste olarak verilir, halüsinasyon riski yok).
+                            // Bulursa normal damgalama akışına (aşağıda) düşer; bulamazsa/API
+                            // hatasında mevcut "atlandı" davranışı aynen sürer.
+                            if (geminiCodeApiHealthy)
+                            {
+                                var (geminiCode, apiFailed) = await geminiClassifier.ClassifyCodeAsync(file, excelCodes, stoppingToken);
+                                if (apiFailed)
+                                {
+                                    geminiCodeApiHealthy = false;
+                                    _logger.LogWarning("Klasör {Folder}: Gemini kod tespiti API hatası verdi, bu klasördeki kalan görseller için atlanacak.", folder);
+                                }
+                                else if (geminiCode is not null && excelPrices.ContainsKey(geminiCode))
+                                {
+                                    matches = [new CodeMatch(geminiCode, Confidence: 100, IsFuzzy: true, Source: "Gemini görü tespiti")];
+                                    chosen[idx] = matches;
+                                    _logger.LogInformation("'{File}': OCR kodu bulamadı, Gemini görü tespiti buldu: {Code}", fileName, geminiCode);
+                                }
+                            }
+                        }
+
+                        if (!chosen.TryGetValue(idx, out matches))
                         {
                             // Adayların rapora yazılması teşhis için kritik: "OCR mi okuyamadı,
                             // Excel'de mi yoktu" sorusu islendi.txt'ye bakarak tek seferde cevaplanır
@@ -496,7 +540,7 @@ public class Worker : BackgroundService
                             decimal priceExcel = excelPrices[m.Code];
                             decimal priceInTry = priceExcel * brand.NetCarpan;
                             decimal priceInUsd = priceInTry / rate.Value.Rate;
-                            return new StampedCode(m.Code, m.Confidence, m.IsFuzzy, priceExcel, priceInTry, priceInUsd);
+                            return new StampedCode(m.Code, m.Confidence, m.IsFuzzy, priceExcel, priceInTry, priceInUsd, m.Source);
                         }).ToList();
                         var best = stampedCodes[0];
 
@@ -513,7 +557,16 @@ public class Worker : BackgroundService
                             stampedFiles.Add(stamped);
                             imageResults.Add(new ImageResult(fileName, true, best.Code, best.Confidence, scan.Matches.Count,
                                 best.PriceExcel, best.PriceTry, best.PriceUsd, Path.GetFileName(stamped), null, best.IsFuzzy, stampedCodes));
-                            if (best.IsFuzzy)
+                            if (best.IsFuzzy && best.Source != "OCR")
+                            {
+                                // Gemini görü tespiti (2026-08-10): OCR'ın Levenshtein-tabanlı kısmi
+                                // güven skoruyla KARIŞTIRILMASIN diye ayrı bir log mesajı — "YAKLAŞIK
+                                // (fuzzy)" ifadesi burada yanıltıcı olurdu (enum zorlaması sayesinde
+                                // Gemini'nin cevabı "kesin" bir seçim, kısmi bir okuma değil).
+                                _logger.LogWarning("'{File}' -> {Source}, KONTROL ÖNERİLİR: kod {Code} -> {PriceExcel:N2} × {Carpan} = {PriceTry:N2} TRY ({PriceUsd:N2} USD) -> {Output}",
+                                    fileName, best.Source, best.Code, best.PriceExcel, brand.NetCarpan, best.PriceTry, best.PriceUsd, Path.GetFileName(stamped));
+                            }
+                            else if (best.IsFuzzy)
                             {
                                 _logger.LogWarning("'{File}' -> YAKLAŞIK (fuzzy) eşleşme, KONTROL ÖNERİLİR: kod {Code} (güven {Confidence:N0}) -> {PriceExcel:N2} × {Carpan} = {PriceTry:N2} TRY ({PriceUsd:N2} USD) -> {Output}",
                                     fileName, best.Code, best.Confidence, best.PriceExcel, brand.NetCarpan, best.PriceTry, best.PriceUsd, Path.GetFileName(stamped));
@@ -567,6 +620,11 @@ public class Worker : BackgroundService
                     {
                         var customerReport = BuildCustomerFacingReport(
                             folder, brand, rate.Value.Rate, allFiles.Count, imageResults, sendResults, stopwatch.Elapsed);
+                        // Müşteriye giden metnin kaydı: gönderim başarısız olsa bile (bot kapalı vb.)
+                        // ne gönderilmeye çalışıldığı klasörde kalıcı olarak dursun diye WhatsApp
+                        // gönderiminden ÖNCE yazılıyor. islendi.txt (iç/ayrıntılı rapor) ile
+                        // karışmaması için ayrı dosya adı.
+                        File.WriteAllText(Path.Combine(folder, "musteri_raporu.txt"), customerReport, Encoding.UTF8);
                         var reportSend = await TrySendTextAsync(http, customerReport, senderPhone, stoppingToken);
                         if (!reportSend.Success)
                         {
@@ -632,6 +690,7 @@ public class Worker : BackgroundService
         List<(string File, ScanResult Scan)> scans,
         List<BrandMultiplier> brandList,
         List<BrandMultiplier> excludedBrands,
+        GeminiVisionClassifier geminiClassifier,
         CancellationToken ct)
     {
         var questionPath = Path.Combine(folder, "marka_sorusu.txt");
@@ -736,6 +795,26 @@ public class Worker : BackgroundService
         {
             var approxNote = ocrOutcome.Approximate ? ", KESİK/HATALI OKUMADAN yaklaşık eşleşme" : "";
             return (ocrOutcome.Brand, $"görsel OCR (kanıt: {string.Join(" ", ocrOutcome.MatchedWords)}{approxNote})");
+        }
+
+        // Son çare: OCR (kod taraması + renk-duyarlı kurtarma) hiçbir marka bulamadıysa
+        // (AmbiguousNames de boşsa — çelişkili/birden fazla marka eşleşmesi durumunda bu adım
+        // ATLANIR, o akış aynen aşağıdaki WhatsApp sorusuna düşer) Claude yerine Google Gemini'nin
+        // görü modeline (2026-08-10, ücretsiz katman) kapalı marka listesiyle son bir şans
+        // verilir — bkz. GeminiBrandClassifier.cs dosya başı yorumu (resim-logo/aşırı dekoratif
+        // font vakası, hiçbir OCR'ın çözemediği durum). GeminiApiKey boşsa ClassifyAsync hiçbir
+        // ağ isteği atmadan null döner, davranış hiç değişmez.
+        if (ocrOutcome.AmbiguousNames.Count == 0)
+        {
+            var visionFiles = scans.Take(4).Select(s => s.File).ToList();
+            var visionResult = await geminiClassifier.ClassifyBrandAsync(visionFiles, brandList, ct);
+            if (visionResult is not null)
+            {
+                _logger.LogInformation("Klasör {Folder}: Gemini görü modeli markayı buldu: {Brand}",
+                    folder, visionResult.Value.Brand.FullName);
+                return (visionResult.Value.Brand, $"Gemini görü modeli (etiket: '{visionResult.Value.RawLabel}')");
+            }
+            _logger.LogInformation("Klasör {Folder}: Gemini görü modeli de marka bulamadı (veya kapalı), kullanıcıya sorulacak.", folder);
         }
 
         if (ocrOutcome.AmbiguousNames.Count > 0)
@@ -1188,12 +1267,19 @@ public class Worker : BackgroundService
                     // basıldı, rapor da hepsini ayrı ayrı listeler.
                     sb.AppendLine($"{tag} {r.FileName} -> {r.AllCodes.Count} farklı kod aynı görselde bulundu, hepsi basıldı -> {r.OutputFileName}");
                     foreach (var s in r.AllCodes)
-                        sb.AppendLine($"    kod {s.Code} (güven {s.Confidence:N0}{(s.IsFuzzy ? ", fuzzy" : "")}) -> {s.PriceExcel:N2} × {brand.NetCarpan} = {s.PriceTry:N2} TRY / {s.PriceUsd:N2} USD");
+                    {
+                        // Source != "OCR" (2026-08-10): Gemini görü tespiti kaynaklı kod — OCR'ın
+                        // Levenshtein-tabanlı kısmi ", fuzzy" notuyla karıştırılmasın diye ayrı not.
+                        var sourceNote = s.Source != "OCR" ? $", kaynak: {s.Source}" : (s.IsFuzzy ? ", fuzzy" : "");
+                        sb.AppendLine($"    kod {s.Code} (güven {s.Confidence:N0}{sourceNote}) -> {s.PriceExcel:N2} × {brand.NetCarpan} = {s.PriceTry:N2} TRY / {s.PriceUsd:N2} USD");
+                    }
                 }
                 else
                 {
                     var candidateNote = r.CandidateCount > 1 ? $", {r.CandidateCount} aday arasından seçildi" : "";
-                    sb.AppendLine($"{tag} {r.FileName} -> kod {r.Code} (güven {r.Confidence:N0}{candidateNote}) -> {r.PriceExcel:N2} × {brand.NetCarpan} = {r.PriceTry:N2} TRY / {r.PriceUsd:N2} USD -> {r.OutputFileName}");
+                    var singleSource = r.AllCodes is { Count: > 0 } ? r.AllCodes[0].Source : "OCR";
+                    var sourceNote = singleSource != "OCR" ? $", kaynak: {singleSource}" : "";
+                    sb.AppendLine($"{tag} {r.FileName} -> kod {r.Code} (güven {r.Confidence:N0}{candidateNote}{sourceNote}) -> {r.PriceExcel:N2} × {brand.NetCarpan} = {r.PriceTry:N2} TRY / {r.PriceUsd:N2} USD -> {r.OutputFileName}");
                 }
             }
             else if (r.Code is not null)

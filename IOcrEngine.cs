@@ -17,7 +17,12 @@ public interface IOcrEngine : IDisposable
     Dictionary<string, float> CollectBrandTokens(string imagePath);
 }
 
-public sealed record CodeMatch(string Code, float Confidence, bool IsFuzzy = false);
+/// <summary><paramref name="Source"/> (2026-08-10, varsayılan "OCR"): normal OCR eşleşmeleri hiç
+/// dokunmadan geçer; Worker.cs'in Gemini kod-tespiti fallback'i (bkz. GeminiVisionClassifier.cs)
+/// sentetik bir CodeMatch oluştururken "Gemini görü tespiti" verir — rapor/log bunu ayırt
+/// edebilsin diye (aynı Levenshtein-fuzzy güven skoruna sahip değil, enum-zorlamalı "kesin" bir
+/// seçim, ikisi karıştırılmamalı).</summary>
+public sealed record CodeMatch(string Code, float Confidence, bool IsFuzzy = false, string Source = "OCR");
 
 /// <summary>Tokens: OCR geçişlerinde toplanan TÜM ham kelimeler → en yüksek güven skoru.
 /// Ürün kodu eşleştirmesinin yan ürünüdür ama marka tespiti de (BrandMatcher) ek bir OCR

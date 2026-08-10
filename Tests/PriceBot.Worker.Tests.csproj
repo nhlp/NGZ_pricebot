@@ -24,6 +24,11 @@
   <ItemGroup>
     <Compile Include="..\ExcelPriceReader.cs" />
     <Compile Include="..\BrandMatcher.cs" />
+    <!-- GeminiVisionClassifier.cs'in TAMAMI DEĞİL, sadece saf/network-SkiaSharp'sız partial
+         kısmı (bkz. GeminiVisionClassifierLabelResolver.cs dosya başı yorumu) — ana dosya
+         SkiaSharp 2.88.8 kullanıyor, test projesi NPOI üzerinden 3.x'e bağımlı; ikisini
+         aynı derlemede birleştirmek NU1605 sürüm çakışmasına yol açardı. -->
+    <Compile Include="..\GeminiVisionClassifierLabelResolver.cs" />
   </ItemGroup>
 
 </Project>
