@@ -54,6 +54,14 @@ public sealed partial class GeminiVisionClassifier
     internal static bool IsModelConfigError(HttpStatusCode statusCode) =>
         statusCode is HttpStatusCode.BadRequest or HttpStatusCode.NotFound;
 
+    /// <summary>GEÇİCİ (aynı istek büyük ihtimalle bir sonraki denemede başarılı olur) sayılan
+    /// HTTP durumları — sadece 5xx (sunucu tarafı, "usually temporary"; gerçek vaka 2026-08-10:
+    /// "model şu anda yoğun talep görüyor" 503'ü). 429 (kota — aynı burst içinde tekrar denemek
+    /// boşuna) ve diğer 4xx (401/403 kimlik/izin gibi kalıcı sorunlar) KALICI sayılır, false döner
+    /// — bkz. GeminiVisionClassifier.cs "devre kesici" kullanımı (Worker.cs geminiCodeApiHealthy).</summary>
+    internal static bool IsTransientError(HttpStatusCode statusCode) =>
+        (int)statusCode is >= 500 and < 600;
+
     /// <summary>Gemini v1beta generateContent isteğini kurar — kapalı-liste (enum) zorlaması
     /// <paramref name="candidateLabels"/> + <see cref="NotFoundLabel"/>'i responseSchema.enum'a
     /// koyarak sağlanır (bkz. dosya başı GeminiVisionClassifier.cs "HALÜSİNASYON ENGELLEME"

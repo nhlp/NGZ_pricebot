@@ -81,6 +81,7 @@ Console.WriteLine($"\nKazanan kod sütunu: '{codeColumn.HeaderName}' ({string.Jo
 
 var excelPrices = codeColumn.Prices;
 var excelCodes = new HashSet<string>(excelPrices.Keys, StringComparer.OrdinalIgnoreCase);
+Console.WriteLine($"Excel kodları ({excelCodes.Count}): {string.Join(", ", excelCodes)}\n");
 
 int stamped = 0, skipped = 0;
 foreach (var (file, scan) in scans)

@@ -130,10 +130,12 @@ public sealed partial class GeminiVisionClassifier
 
     /// <summary>OCR'ın hiç bulamadığı bir klasör için son çare marka tespiti. Görseller TEK TEK,
     /// sıralı denenir (bkz. dosya başı "KOTA KORUMA" notu) — ilk başarılı sonuçta durulur.
-    /// API/ağ hatası alınırsa (kota, timeout, vb.) HEMEN durulur, kalan görseller denenmez (aynı
-    /// duvara çarpar, boşuna harcanır); "BULUNAMADI" alınırsa sıradaki görsel denenir. Sonuçta
-    /// hiçbiri bulamazsa null döner — çağıran taraf bunu WhatsApp sorusuna düşmesi gerektiği
-    /// şeklinde okur.</summary>
+    /// KALICI hata alınırsa (kota, config, vb. — bkz. <see cref="LabelResult.IsTransientFailure"/>)
+    /// HEMEN durulur, kalan görseller denenmez (aynı duvara çarpar, boşuna harcanır); GEÇİCİ hata
+    /// (503/timeout/ağ — 2026-08-10, gerçek vaka: bir "model şu anda yoğun" 503'ü tüm klasörün
+    /// kalan görsellerini gereksiz yere atlatmıştı) alınırsa sıradaki görsel yine denenir;
+    /// "BULUNAMADI" alınırsa da sıradaki görsel denenir. Sonuçta hiçbiri bulamazsa null döner —
+    /// çağıran taraf bunu WhatsApp sorusuna düşmesi gerektiği şeklinde okur.</summary>
     public async Task<(BrandMultiplier Brand, string RawLabel)?> ClassifyBrandAsync(
         IReadOnlyList<string> imagePaths,
         IReadOnlyList<BrandMultiplier> candidates,
@@ -147,16 +149,29 @@ public sealed partial class GeminiVisionClassifier
 
         foreach (var path in imagePaths.Take(MaxImages))
         {
-            var label = await ClassifyLabelAsync([path], candidateNames, BrandUserPrompt, BrandSystemPrompt, ct);
-            if (label is null) return null; // API/ağ hatası — kalan görselleri deneme
-            if (label == NotFoundLabel) continue; // bu görselde marka yok, sıradakini dene
+            _logger.LogInformation("Gemini görü tespiti: marka için soruluyor -> {File}", Path.GetFileName(path));
+            var result = await ClassifyLabelAsync([path], candidateNames, BrandUserPrompt, BrandSystemPrompt, ct);
+            if (result.Label is null)
+            {
+                if (result.IsTransientFailure)
+                {
+                    _logger.LogInformation("Gemini görü tespiti: '{File}' için geçici bir hata alındı, sıradaki görsel deneniyor.", Path.GetFileName(path));
+                    continue; // geçici hata (503/timeout/ağ) — sıradaki görseli dene
+                }
+                return null; // kalıcı hata (kota/config) — kalan görselleri deneme
+            }
+            if (result.Label == NotFoundLabel)
+            {
+                _logger.LogInformation("Gemini görü tespiti: '{File}' için marka BULUNAMADI yanıtı geldi, sıradaki görsel deneniyor.", Path.GetFileName(path));
+                continue; // bu görselde marka yok, sıradakini dene
+            }
 
-            var brand = ResolveLabelToBrand(label, candidates);
-            if (brand is not null) return (brand, label);
+            var brand = ResolveLabelToBrand(result.Label, candidates);
+            if (brand is not null) return (brand, result.Label);
 
             // Teorik olarak olmamalı (enum zorlaması candidateNames dışında bir değere izin
             // vermiyor) — yine de savunmacı: beklenmeyen etiketle sıradaki görseli dene.
-            _logger.LogWarning("Gemini görü marka tespiti: dönen etiket ('{Label}') aday listesiyle eşleşmedi.", label);
+            _logger.LogWarning("Gemini görü marka tespiti: dönen etiket ('{Label}') aday listesiyle eşleşmedi.", result.Label);
         }
 
         return null;
@@ -167,8 +182,12 @@ public sealed partial class GeminiVisionClassifier
     /// olarak TEK görsel + TEK istektir — kod görsele özgüdür, marka gibi klasör genelinde sabit
     /// değil, "tekrar deneyecek aynı kodlu başka görsel" kavramı yok.
     /// <c>ApiFailed=true</c> döndüğünde çağıran taraf (Worker.cs) o klasördeki KALAN görseller
-    /// için Gemini kod tespitini atlamalı (devre kesici — aynı kota/ağ duvarına klasördeki her
-    /// görsel için ayrı ayrı çarpmamak için).</summary>
+    /// için Gemini kod tespitini atlamalı (devre kesici — aynı kota/config duvarına klasördeki her
+    /// görsel için ayrı ayrı çarpmamak için). SADECE kalıcı hatalarda (429 kota, 400/404 config)
+    /// true döner — geçici hatalarda (503/timeout/ağ, 2026-08-10 gerçek vaka: bir "model şu anda
+    /// yoğun" 503'ü devre kesiciyi tetikleyip aynı klasördeki 2 sağlam görseli gereksiz atlatmıştı)
+    /// false döner: bu TEK görsel "bulunamadı" gibi atlanır ama devre açık kalır, sonraki görsel
+    /// için Gemini yine denenir.</summary>
     public async Task<(string? Code, bool ApiFailed)> ClassifyCodeAsync(
         string imagePath,
         IReadOnlyCollection<string> candidateCodes,
@@ -178,20 +197,43 @@ public sealed partial class GeminiVisionClassifier
             return (null, false);
 
         var codes = candidateCodes.Distinct(StringComparer.Ordinal).OrderBy(c => c, StringComparer.Ordinal).ToList();
-        var label = await ClassifyLabelAsync([imagePath], codes, CodeUserPrompt, CodeSystemPrompt, ct);
+        _logger.LogInformation("Gemini görü tespiti: ürün kodu için soruluyor -> {File}", Path.GetFileName(imagePath));
+        var result = await ClassifyLabelAsync([imagePath], codes, CodeUserPrompt, CodeSystemPrompt, ct);
 
-        if (label is null) return (null, true); // API/ağ hatası — devre kesiciyi tetikle
-        return label == NotFoundLabel ? (null, false) : (label, false);
+        if (result.Label is null)
+        {
+            if (result.IsTransientFailure)
+            {
+                _logger.LogInformation("Gemini görü tespiti: '{File}' için geçici bir hata alındı, bu görsel atlanacak ama klasördeki sonraki görseller için Gemini yine denenecek.", Path.GetFileName(imagePath));
+                return (null, ApiFailed: false);
+            }
+            return (null, ApiFailed: true); // kalıcı hata (kota/config) — devre kesiciyi tetikle
+        }
+        if (result.Label == NotFoundLabel)
+        {
+            _logger.LogInformation("Gemini görü tespiti: '{File}' için ürün kodu BULUNAMADI yanıtı geldi.", Path.GetFileName(imagePath));
+            return (null, false);
+        }
+        return (result.Label, false);
     }
+
+    /// <summary>Bir <see cref="ClassifyLabelAsync"/> çağrısının sonucu. <paramref name="Label"/>
+    /// null ise başarısızlık nedenini <see cref="IsTransientFailure"/> ayırt eder: true = geçici
+    /// (503/5xx/timeout/ağ hatası — aynı istek büyük ihtimalle bir sonraki denemede başarılı olur,
+    /// çağıranlar KALAN görseller için denemeye devam etmeli); false = kalıcı (429 kota, 400/404
+    /// config, içerik engeli, bozuk görsel dosyası — tekrar denemek aynı sonucu verir, çağıranlar
+    /// durmalı). 2026-08-10: eskiden bu ayrım yoktu, TÜM hatalar kalıcı sayılıp devre kesici/erken
+    /// dönüş tetikleniyordu — gerçek vaka: bir geçici 503, aynı klasördeki 2 sağlam görselin de
+    /// Gemini'ye hiç sorulmadan atlanmasına yol açmıştı.</summary>
+    private readonly record struct LabelResult(string? Label, bool IsTransientFailure = false);
 
     /// <summary>Ortak çekirdek (2026-08-10) — hem <see cref="ClassifyBrandAsync"/> hem
     /// <see cref="ClassifyCodeAsync"/> bunu kullanır, kod tekrarı yok. Görsel(ler)i hazırlar,
     /// kapalı-liste (enum) zorlamalı isteği kurar, gönderir, `{"value": "..."}` etiketini
     /// ayrıştırır. Dönüş: gerçek bir aday (enum zorlaması sayesinde <paramref name="candidateLabels"/>
-    /// içinde birebir), "BULUNAMADI", ya da <c>null</c> (görsel hazırlanamadı / API-ağ hatası /
-    /// engellendi / parse hatası — çağıran taraf bunu "daha fazla deneme, güvenli tarafta kal"
-    /// olarak okumalı).</summary>
-    private async Task<string?> ClassifyLabelAsync(
+    /// içinde birebir), "BULUNAMADI", ya da <c>Label=null</c> (görsel hazırlanamadı / API-ağ hatası /
+    /// engellendi / parse hatası — bkz. <see cref="LabelResult"/>).</summary>
+    private async Task<LabelResult> ClassifyLabelAsync(
         List<string> imagePaths, List<string> candidateLabels,
         string userPrompt, string systemPrompt, CancellationToken ct)
     {
@@ -204,9 +246,10 @@ public sealed partial class GeminiVisionClassifier
         {
             // Görsel decode/resize hatası (bozuk dosya vb.) — sınıflandırma dışı bırak,
             // çağıran taraf mevcut (WhatsApp sorusu / görsel atlama) akışına düşsün. OCR tarafı
-            // zaten aynı görseli işlemiş olduğu için bu son derece nadir olmalı.
+            // zaten aynı görseli işlemiş olduğu için bu son derece nadir olmalı. Kalıcı bir hata —
+            // aynı dosyayı tekrar denemek aynı sonucu verir.
             _logger.LogWarning(ex, "Gemini görü tespiti: görsel hazırlanamadı, atlanıyor.");
-            return null;
+            return new LabelResult(null, IsTransientFailure: false);
         }
 
         var requestBody = BuildRequest(imageParts, candidateLabels, userPrompt, systemPrompt);
@@ -223,25 +266,31 @@ public sealed partial class GeminiVisionClassifier
                 _model, result.StatusCode, _fallbackModel);
             result = await SendClassifyRequestAsync(_fallbackModel, json, ct);
         }
-        if (!result.Success) return null;
+        if (!result.Success) return new LabelResult(null, result.IsTransient);
 
         var label = ExtractLabel(result.ResponseText!, out var blockReason);
         if (blockReason is not null)
         {
+            // İçerik engeli kalıcıdır (aynı görsel + prompt tekrar denense de aynı sonucu verir).
             _logger.LogWarning("Gemini görü tespiti: yanıt engellendi/tamamlanmadı ({Reason}).", blockReason);
-            return null;
+            return new LabelResult(null, IsTransientFailure: false);
         }
-        return label;
+        return new LabelResult(label);
     }
 
-    private readonly record struct GeminiHttpResult(bool Success, bool IsModelConfigError, int StatusCode, string? ResponseText);
+    private readonly record struct GeminiHttpResult(bool Success, bool IsModelConfigError, bool IsTransient, int StatusCode, string? ResponseText);
 
     /// <summary>Tek bir generateContent isteğini belirtilen modele gönderir — <see
     /// cref="ClassifyLabelAsync"/>'in hem birincil hem (gerekirse) yedek model denemesi için
     /// kullandığı ortak adım. <see cref="GeminiHttpResult.IsModelConfigError"/>, çağıranın yedek
     /// modele geçip geçmeyeceğine karar vermesi için: SADECE HTTP 400/404 (kalıcı, model'e özgü
     /// hata) true — 429/5xx/timeout gibi geçici ya da modelden bağımsız hatalarda false (yedek
-    /// denemek boşuna kotayı ikiye katlar, bkz. dosya başı notu).</summary>
+    /// denemek boşuna kotayı ikiye katlar, bkz. dosya başı notu). <see
+    /// cref="GeminiHttpResult.IsTransient"/> ise çağıranların (Worker.cs'teki devre kesici dahil)
+    /// KALAN görseller/adaylar için denemeye devam edip etmeyeceğine karar vermesi için (2026-08-10):
+    /// 5xx (sunucu tarafı, "usually temporary") ve ağ/timeout istisnaları true — 429 (kota, aynı
+    /// burst içinde tekrar denemek boşuna) ve diğer 4xx (401/403 kimlik/izin gibi kalıcı sorunlar)
+    /// false.</summary>
     private async Task<GeminiHttpResult> SendClassifyRequestAsync(string model, string json, CancellationToken ct)
     {
         try
@@ -259,16 +308,18 @@ public sealed partial class GeminiVisionClassifier
                 // Diğer tüm HTTP hataları (429 kota dahil) çağıran tarafın mevcut fallback akışına
                 // (WhatsApp sorusu / görsel atlama) sessizce düşer, kullanıcı hiçbir şey fark etmez.
                 var isConfigError = IsModelConfigError(resp.StatusCode);
+                var isTransient = IsTransientError(resp.StatusCode);
                 _logger.LogWarning("Gemini görü tespiti ({Model}): HTTP {Status} — {Body}", model, (int)resp.StatusCode, Truncate(responseText, 500));
-                return new GeminiHttpResult(false, isConfigError, (int)resp.StatusCode, responseText);
+                return new GeminiHttpResult(false, isConfigError, isTransient, (int)resp.StatusCode, responseText);
             }
 
-            return new GeminiHttpResult(true, false, (int)resp.StatusCode, responseText);
+            return new GeminiHttpResult(true, false, false, (int)resp.StatusCode, responseText);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            // Ağ hatası/timeout/DNS vb. — her zaman geçici sayılır (bkz. IsTransient dokümantasyonu).
             _logger.LogWarning(ex, "Gemini görü tespiti ({Model}): istek hatası.", model);
-            return new GeminiHttpResult(false, false, 0, null);
+            return new GeminiHttpResult(false, false, IsTransient: true, 0, null);
         }
     }
 
