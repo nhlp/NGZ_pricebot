@@ -71,23 +71,29 @@ public class ExcelPriceReader
     }
 
     /// <summary>Başlık satırındaki TÜM olası kod sütunlarını (bir tane değil) adaylar olarak döner.
-    /// Öncelik puanı: 2 = "kod"/"sku"/"id" içeren ama "barkod"/"yaş"/"yas"/"beden" OLMAYAN başlık
-    /// (en güvenilir sinyal), 1 = "model"/"stok"/"ürün" içeren başlık, 0 = hiçbir başlık eşleşmediği
-    /// için ilk sütunu kod sayan eski geriye dönük davranış. "barkod" veya "yaş"/"yas"/"beden"
-    /// içeren başlıklar HİÇBİR ZAMAN aday olarak eklenmez (sütun içeriği ne olursa olsun) —
-    /// üretim vakası (ERAY KIDS, 2026-08-03): "KOD-B" + "BARKOD" aynı başlık satırında, eski kod
-    /// "kod" alt-dizesi için satırı soldan sağa tararken barkod sütununü son eşleşen olarak üzerine
-    /// yazıyordu; tüm 145 satır 13 haneli EAN değeriyle anahtarlanmış, OCR'ın görselden doğru
-    /// okuduğu 4 haneli stil numarasıyla (regex \d{3,7}) hiçbir zaman tam olarak eşleşemedi (string
-    /// eşitliği, alt-dize değil) ve klasördeki HİÇBİR görsel damgalanamadı. Barkod bir EAN olarak
-    /// yapısal olarak asla gerçek ürün kodu OLAMAYACAĞI için (uzunluk uyuşmazlığı yapısal, tesadüfi
-    /// değil), OCR oylamasına bırakılmadan kaynakta tamamen elenir. Yaş/beden sütunları da aynı
-    /// şekilde elenir çünkü ürün kodu değil beden/yaş tablosu değeridir — değer bazlı
-    /// <see cref="LooksLikeSizeOrAgeColumn"/> kontrolü sadece tire'li ARALIK ("134-140") içeren
-    /// sütunları yakalar, tek bir yaş/beden sayısı ("3", "5") içeren sütunları yakalamaz; başlık
-    /// kontrolü bu boşluğu kapatır. Değerleri çoğunlukla tire ile ayrılmış rakam listesi (beden/yaş
-    /// aralığı) olan sütunlar da, başlığı ne olursa olsun tamamen elenir — bunlar asla ürün kodu
-    /// olamaz (bkz. <see cref="SizeOrAgeRangeToken"/>).</summary>
+    /// Öncelik puanı: 2 = "kod"/"code"/"sku"/"id" içeren ama "barkod"/"barcode"/"yaş"/"yas"/"beden"
+    /// OLMAYAN başlık (en güvenilir sinyal), 1 = "model"/"stok"/"ürün" içeren başlık, 0 = hiçbir
+    /// başlık eşleşmediği için ilk sütunu kod sayan eski geriye dönük davranış. "barkod"/"barcode"
+    /// veya "yaş"/"yas"/"beden" içeren başlıklar HİÇBİR ZAMAN aday olarak eklenmez (sütun içeriği ne
+    /// olursa olsun) — üretim vakası (ERAY KIDS, 2026-08-03): "KOD-B" + "BARKOD" aynı başlık
+    /// satırında, eski kod "kod" alt-dizesi için satırı soldan sağa tararken barkod sütununü son
+    /// eşleşen olarak üzerine yazıyordu; tüm 145 satır 13 haneli EAN değeriyle anahtarlanmış, OCR'ın
+    /// görselden doğru okuduğu 4 haneli stil numarasıyla (regex \d{3,7}) hiçbir zaman tam olarak
+    /// eşleşemedi (string eşitliği, alt-dize değil) ve klasördeki HİÇBİR görsel damgalanamadı.
+    /// Barkod bir EAN olarak yapısal olarak asla gerçek ürün kodu OLAMAYACAĞI için (uzunluk
+    /// uyuşmazlığı yapısal, tesadüfi değil), OCR oylamasına bırakılmadan kaynakta tamamen elenir.
+    /// Yaş/beden sütunları da aynı şekilde elenir çünkü ürün kodu değil beden/yaş tablosu değeridir —
+    /// değer bazlı <see cref="LooksLikeSizeOrAgeColumn"/> kontrolü sadece tire'li ARALIK ("134-140")
+    /// içeren sütunları yakalar, tek bir yaş/beden sayısı ("3", "5") içeren sütunları yakalamaz;
+    /// başlık kontrolü bu boşluğu kapatır. Değerleri çoğunlukla tire ile ayrılmış rakam listesi
+    /// (beden/yaş aralığı) olan sütunlar da, başlığı ne olursa olsun tamamen elenir — bunlar asla
+    /// ürün kodu olamaz (bkz. <see cref="SizeOrAgeRangeToken"/>). "code"/"barcode" (İngilizce)
+    /// 2026-08-10'da eklendi — üretim vakası (PODİUMİNİ "Price tl.xlsx"): başlıklar İngilizce
+    /// bir sipariş-formu şablonundan ("Code"/"Description"/"Qty"/"Unit Price"/"Price") geliyordu;
+    /// "Code" Türkçe "kod" alt-dizesini içermediği için hiçbir sütun kod adayı bulunamıyor, tüm
+    /// satır başlık tespitinden reddediliyor ve akış başlıksız-tablo sezgisine düşüyordu — o
+    /// sezginin fiyat sütunu tahmini de ayrı bir hataya yol açtı (bkz. <see cref="DetectPriceColumn"/>
+    /// yorumu), sonuç: 27 görsel gerçek müşteriye $0,00 damgalanıp gönderildi.</summary>
     public static List<CodeColumnCandidate> LoadCandidateCodeColumns(string excelPath) =>
         LoadCandidateCodeColumns(LoadGrid(excelPath));
 
@@ -176,8 +182,8 @@ public class ExcelPriceReader
                 // olduğu için burada da kaynakta tamamen dışlanır. "model" gibi daha belirsiz
                 // başlıklar da (başka bir üretim vakası: gerçek kod "MODEL" sütununda basılıydı)
                 // orta öncelikli aday sayılır.
-                int priority = (colName.Contains("barkod") || colName.Contains("yaş") || colName.Contains("yas") || colName.Contains("beden")) ? -1
-                    : (colName.Contains("kod") || colName.Contains("sku") || colName.Contains("id")) ? 2
+                int priority = (colName.Contains("barkod") || colName.Contains("barcode") || colName.Contains("yaş") || colName.Contains("yas") || colName.Contains("beden")) ? -1
+                    : (colName.Contains("kod") || colName.Contains("code") || colName.Contains("sku") || colName.Contains("id")) ? 2
                     : (colName.Contains("model") || colName.Contains("stok") || colName.Contains("ürün") || colName.Contains("urun")) ? 1
                     : -1;
                 if (priority >= 0) rowCandidates.Add((col, raw, priority));
@@ -215,6 +221,12 @@ public class ExcelPriceReader
                 break;
             }
         }
+
+        // Aşağıdaki şekil-bazlı eleme (LooksLikeSizeOrAgeColumn) güvenlik ağının GERÇEKTEN
+        // başlıksız bir tabloda (bu bayrak true) mı yoksa açık ama zayıf bir başlıkla (öncelik
+        // 0/1) mı karşı karşıya olduğumuzu ayırt etmesi gerekiyor — bkz. aşağıdaki BuildCandidates
+        // notu ve "MİNA MİNO" vakası.
+        bool wasHeaderless = headerRow is null;
 
         if (headerRow is null)
         {
@@ -266,67 +278,102 @@ public class ExcelPriceReader
             }
         }
 
-        var result = new List<CodeColumnCandidate>();
-        foreach (var (col, name, priority) in codeColumnHeaders)
-        {
-            if (LooksLikeSizeOrAgeColumn(rows, headerRow.RowNumber, col, priority)) continue;
+        var result = BuildCandidates(applySizeOrAgeFilter: true);
 
-            var prices = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
-            var descriptions = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            var skippedRows = new List<(int Row, string Code, string RawPrice)>();
-
-            foreach (var row in rows.Where(r => r.RowNumber > headerRow.RowNumber))
-            {
-                try
-                {
-                    string productCode = row.Cell(col).Trim();
-                    if (string.IsNullOrEmpty(productCode)) continue;
-
-                    string priceRaw = row.Cell(priceCol);
-                    if (TryParsePrice(priceRaw, out decimal priceTry))
-                    {
-                        prices[productCode] = priceTry;
-                    }
-                    else
-                    {
-                        skippedRows.Add((row.RowNumber, productCode, priceRaw));
-                    }
-
-                    // Kod/fiyat dışındaki hücreler (ör. "Malın Cinsi", "Ürün Adı" gibi serbest-
-                    // metin sütunlar) birleştirilip saklanır — hangi sütunun "açıklama" olduğunu
-                    // başlıktan tahmin etmeye çalışmak yerine (kırılgan, layout'a göre değişir),
-                    // FullScanOcr'daki yaş-aralığı/aile-stili çapraz doğrulaması için satırın
-                    // serbest metnini kullanmak yeterli ve daha sağlam (bkz. FullScanOcr v11).
-                    // SADECE RAKAMDAN oluşan hücreler (Sıra No, Miktar gibi) dışlanır — bunlar
-                    // satırdan satıra değişen gürültüdür ve aynı ürün ailesinin farklı yaş-grubu
-                    // satırlarının "yaş aralığı hariç" birebir aynı metne indirgenmesini bozar.
-                    var otherCells = row.Cells
-                        .Where(c => c.Key != col && c.Key != priceCol)
-                        .OrderBy(c => c.Key)
-                        .Select(c => c.Value)
-                        .Where(v => !string.IsNullOrWhiteSpace(v) && v.Any(ch => !char.IsDigit(ch)));
-                    descriptions[productCode] = string.Join(" | ", otherCells);
-                }
-                catch
-                {
-                    // Hatalı satırları atla
-                }
-            }
-
-            if (prices.Count > 0)
-                result.Add(new CodeColumnCandidate(name, col, priority, prices, skippedRows, descriptions));
-        }
+        // GÜVENLİK AĞI (2026-08-10, gerçek vaka: "MİNA MİNO" / "2026 3 İP ALİSA FİYAT LİSTESİ"):
+        // gerçekten başlıksız bir tabloda (marka adı + banner başlığı var ama "KOD" diye bir
+        // sütun başlığı YOK) tek-tireli stil kodları ("26-400" gibi) ile gerçek beden/yaş
+        // aralıkları AYNI şekle sahip (bkz. LooksLikeSizeOrAgeColumn). O fonksiyonun kurtarma
+        // kuralı ("başlık açıkça KOD/SKU/ID diyorsa elenmez") headerPriority>=2 gerektiriyor —
+        // ama başlıksız-tablo yolunda ÜRETİLEN adaylar hep priority=0'dır (sentetik, gerçek bir
+        // başlık metni yok), bu yüzden kurtarma KURALI hiçbir zaman devreye giremez. Sonuç: TEK
+        // aday (bu şekle sahip kod sütunu) sessizce elenir, LoadCandidateCodeColumns BOŞ liste
+        // döner, Worker.cs "olası bir ürün kodu sütunu bulunamadı" deyip klasörü HER turda atlar
+        // — islendi.txt hiç yazılmadığı için klasör sonsuza dek hiç işlenmemiş gibi kalır (gerçek
+        // vakada worker'ın bu klasöre hiç dokunmamasının kök nedeni buydu). Başlıklı bir tabloda
+        // aynı ambiguity için güvenlik-öncelikli davranış (zayıf/yok başlıkta ELE) hâlâ doğru
+        // (bkz. LoadCandidateCodeColumns_TekTireliDegerZayifBasliklaEleniyor testi) — o yüzden bu
+        // geri düşüş SADECE gerçekten başlıksız tabloda VE eleme tüm adayları sildiğinde çalışır.
+        if (result.Count == 0 && wasHeaderless && codeColumnHeaders.Count > 0)
+            result = BuildCandidates(applySizeOrAgeFilter: false);
 
         return result;
+
+        List<CodeColumnCandidate> BuildCandidates(bool applySizeOrAgeFilter)
+        {
+            var candidates = new List<CodeColumnCandidate>();
+            foreach (var (col, name, priority) in codeColumnHeaders)
+            {
+                if (applySizeOrAgeFilter && LooksLikeSizeOrAgeColumn(rows, headerRow.RowNumber, col, priority)) continue;
+
+                var prices = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+                var descriptions = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                var skippedRows = new List<(int Row, string Code, string RawPrice)>();
+
+                foreach (var row in rows.Where(r => r.RowNumber > headerRow.RowNumber))
+                {
+                    try
+                    {
+                        string productCode = row.Cell(col).Trim();
+                        if (string.IsNullOrEmpty(productCode)) continue;
+
+                        string priceRaw = row.Cell(priceCol);
+                        if (TryParsePrice(priceRaw, out decimal priceTry))
+                        {
+                            prices[productCode] = priceTry;
+                        }
+                        else
+                        {
+                            skippedRows.Add((row.RowNumber, productCode, priceRaw));
+                        }
+
+                        // Kod/fiyat dışındaki hücreler (ör. "Malın Cinsi", "Ürün Adı" gibi serbest-
+                        // metin sütunlar) birleştirilip saklanır — hangi sütunun "açıklama" olduğunu
+                        // başlıktan tahmin etmeye çalışmak yerine (kırılgan, layout'a göre değişir),
+                        // FullScanOcr'daki yaş-aralığı/aile-stili çapraz doğrulaması için satırın
+                        // serbest metnini kullanmak yeterli ve daha sağlam (bkz. FullScanOcr v11).
+                        // SADECE RAKAMDAN oluşan hücreler (Sıra No, Miktar gibi) dışlanır — bunlar
+                        // satırdan satıra değişen gürültüdür ve aynı ürün ailesinin farklı yaş-grubu
+                        // satırlarının "yaş aralığı hariç" birebir aynı metne indirgenmesini bozar.
+                        var otherCells = row.Cells
+                            .Where(c => c.Key != col && c.Key != priceCol)
+                            .OrderBy(c => c.Key)
+                            .Select(c => c.Value)
+                            .Where(v => !string.IsNullOrWhiteSpace(v) && v.Any(ch => !char.IsDigit(ch)));
+                        descriptions[productCode] = string.Join(" | ", otherCells);
+                    }
+                    catch
+                    {
+                        // Hatalı satırları atla
+                    }
+                }
+
+                if (prices.Count > 0)
+                    candidates.Add(new CodeColumnCandidate(name, col, priority, prices, skippedRows, descriptions));
+            }
+
+            return candidates;
+        }
     }
 
     /// <summary>Başlıksız tabloda fiyat sütununu değer BİÇİMİNE bakarak tahmin eder (kullanıcı
     /// isteği, 2026-08-07): virgül/nokta ondalık ayırıcılı değerler ("204,25", "218.50") en güçlü
     /// sinyaldir — ürün kodları neredeyse hiç ondalık içermez, fiyatlar sıkça içerir. Hiçbir aday
     /// sütun ondalık içermiyorsa (ör. tüm fiyatlar tam sayı, "325" gibi — testFOt1 vakası), en
-    /// SAĞDAKİ çoğunlukla-sayısal sütun fiyat kabul edilir (yaygın tablo kuralı: fiyat genelde en
-    /// sonda). Hiçbir sütun çoğunlukla sayısal değilse null döner (çağıran taraf kendi son çare
-    /// mantığına düşer).</summary>
+    /// SAĞDAKİ çoğunlukla-sayısal VE en az bir sıfırdan farklı değer içeren sütun fiyat kabul edilir
+    /// (yaygın tablo kuralı: fiyat genelde en sonda). Hiçbir sütun çoğunlukla sayısal değilse null
+    /// döner (çağıran taraf kendi son çare mantığına düşer).
+    ///
+    /// SIFIR-SÜTUN GÜVENLİK AĞI (2026-08-10, üretim vakası PODİUMİNİ "Price tl.xlsx"): İngilizce bir
+    /// sipariş-formu şablonunda "Unit Price" (gerçek birim fiyat, E sütunu) hemen solunda, "Price"
+    /// (F sütunu, ="Qty × Unit Price" formülü) sağında duruyordu; Qty hiç doldurulmadığı için F
+    /// her satırda 0'dı. Hiçbir sütun ondalık içermediğinden (tüm fiyatlar tam sayı) eski kod
+    /// doğrudan "en sağdaki sayısal sütun" olan F'yi seçiyordu — ColumnHasAnyNonZeroValue kontrolü
+    /// (aşağıda) o zamana kadar SADECE başlıklı yol için vardı (bkz. LoadCandidateCodeColumns'taki
+    /// "Tutarı" notu), bu başlıksız-tahmin yoluna hiç uygulanmıyordu. Sonuç: 27 gerçek ürün fotoğrafı
+    /// müşteriye $0,00 damgalanıp gönderildi. Düzeltme: "en sağdaki" seçimi artık sadece gerçekten
+    /// sıfırdan farklı veri taşıyan sütunlar arasından yapılıyor; tamamı sıfır olan bir formül
+    /// sütunu (başlığı ne kadar "fiyat gibi" görünürse görünsün) hiçbir zaman tercih edilmez.</summary>
     private static int? DetectPriceColumn(List<GridRow> rows, int headerRowNumber, IReadOnlyList<int> candidateCols, int sampleSize = 20)
     {
         int? bestDecimalCol = null;
@@ -353,6 +400,14 @@ public class ExcelPriceReader
         }
 
         if (bestDecimalCol is not null) return bestDecimalCol;
+
+        var nonZeroNumericCols = numericCols.Where(c => ColumnHasAnyNonZeroValue(rows, headerRowNumber, c)).ToList();
+        if (nonZeroNumericCols.Count > 0) return nonZeroNumericCols.Max();
+
+        // Hiçbir aday sıfırdan farklı veri taşımıyorsa (ör. gerçekten tamamı boş bir taslak liste)
+        // eski davranışa dön — en azından şekil bazlı bir tahminde bulunmak, null dönüp tabloyu
+        // tamamen reddetmekten daha iyi; ColumnHasAnyNonZeroValue zaten sadece BU tahmini iyileştirir,
+        // nihai $0.00 koruması yine de kod tarafında satır satır uygulanıyor.
         return numericCols.Count > 0 ? numericCols.Max() : null;
     }
 

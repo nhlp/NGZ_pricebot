@@ -221,6 +221,11 @@ public sealed class PaddleScanOcr : IOcrEngine
             // (bkz. TryExtractHyphen yorumu).
             TryExtractHyphen(word, conf, extracted);
 
+            // Harf önekli kod ("V-029" gibi) da HER ZAMAN ayrı bir aday olarak denenir — yapısal
+            // olarak bir harfle başladığı için SizeOrAgeRangeToken (saf rakam) ile asla çakışmaz,
+            // aşağıdaki filtreden bilinçli olarak ETKİLENMEZ (bkz. TryExtractLetterPrefix yorumu).
+            TryExtractLetterPrefix(word, conf, extracted);
+
             // Beden/yaş listesi ("134-140-146-152", "98-104" gibi) SAF RAKAM alt-dizisi
             // çıkarımına asla girmez (2026-08-03 vakası: "98-104" -> "104" gibi tesadüfi bir
             // rakam dizisi başka bir ürün koduyla yanlışlıkla eşleşebiliyordu).
@@ -232,6 +237,7 @@ public sealed class PaddleScanOcr : IOcrEngine
             if (normalized != word)
             {
                 TryExtractHyphen(normalized, conf * 0.95f, extracted);
+                TryExtractLetterPrefix(normalized, conf * 0.95f, extracted);
                 if (!SizeOrAgeRangeToken.IsMatch(normalized))
                     TryExtract(normalized, conf * 0.95f, extracted);
             }
@@ -269,6 +275,37 @@ public sealed class PaddleScanOcr : IOcrEngine
             for (int len = 1; len <= tail.Length; len++)
             {
                 var candidate = m.Value[..(dash + 1 + len)];
+                if (!extracted.TryGetValue(candidate, out var best) || conf > best)
+                    extracted[candidate] = conf;
+            }
+        }
+    }
+
+    /// <summary>Harf önekli stil-numarası kodları ("V-029", "A-102" gibi — gerçek vaka, 2026-08-10:
+    /// "mini pakel" KIŞLIK ALİSA-PİYASA listesi, Excel kodları "V-025".."V-072") için ek bir aday
+    /// deseni. `_candidate` (appsettings'ten gelen `\d{3,7}`) harf içermeyen SAF rakam dizisi arar;
+    /// "V-029" token'ından yalnızca öneksiz "029" çıkar. Ama Excel'de kod TAM "V-029" string'i
+    /// olarak saklandığı için (MatchExact tam string eşitliği kontrol eder, alt-dize değil)
+    /// öneksiz "029" o kodla ASLA eşleşemez — bu şekil hiç ele alınmadığı sürece bu tür kod
+    /// ailesindeki HİÇBİR görsel eşleşmez (gerçek vakada bir Excel'in 33 görselinin TAMAMI
+    /// "ATANAMADI" kaldı). `HyphenCandidate`'in (rakam-tire-rakam) harf önekli sürümü; aynı
+    /// bitişik-token riski (bkz. TryExtractHyphen yorumu — kod rozetinin hemen altına yaş aralığı
+    /// boşluksuz bitişebilir) burada da geçerli olduğu için aynı önek-üretme stratejisi
+    /// kullanılır. Bilinçli olarak SizeOrAgeRangeToken filtresinin DIŞINDA (TryExtractHyphen ile
+    /// aynı gerekçe) — ama pratikte hiçbir zaman onunla çakışmaz, çünkü SizeOrAgeRangeToken saf
+    /// rakamla başlamak zorundadır, bu desen ise bir harfle.</summary>
+    private static readonly Regex LetterPrefixCandidate = new(@"[A-Z]{1,3}-\d{1,5}", RegexOptions.Compiled);
+
+    private static void TryExtractLetterPrefix(string word, float conf, Dictionary<string, float> extracted)
+    {
+        foreach (Match m in LetterPrefixCandidate.Matches(word))
+        {
+            var dash = m.Value.IndexOf('-');
+            var prefix = m.Value[..dash];
+            var tail = m.Value[(dash + 1)..];
+            for (int len = 1; len <= tail.Length; len++)
+            {
+                var candidate = prefix + "-" + tail[..len];
                 if (!extracted.TryGetValue(candidate, out var best) || conf > best)
                     extracted[candidate] = conf;
             }

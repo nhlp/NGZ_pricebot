@@ -505,6 +505,184 @@ public class ExcelPriceReaderTests
         finally { File.Delete(path); }
     }
 
+    /// <summary>GERÇEK VAKA ("MİNA MİNO" / "2026 3 İP ALİSA FİYAT LİSTESİ.xlsx", 2026-08-10):
+    /// tablo TAMAMEN başlıksız — A1:C1 birleşik hücresi marka adı + banner başlığı + " FİYAT"
+    /// içeriyor, "KOD" diye bir sütun başlığı YOK. Kodlar DECO-KIDS tarzı tek-tireli ("26-400")
+    /// — bu şekil gerçek bir beden/yaş aralığıyla (LooksLikeSizeOrAgeColumn) ayırt edilemez, o
+    /// fonksiyonun kurtarma kuralı headerPriority>=2 gerektiriyor ama başlıksız yoldaki TEK aday
+    /// hep priority=0. Önceki davranışta bu, TEK adayı sessizce eleyip LoadCandidateCodeColumns'ı
+    /// BOŞ döndürüyordu — Worker.cs "olası bir ürün kodu sütunu bulunamadı" deyip klasörü HER
+    /// turda atlıyordu, islendi.txt hiç yazılmadığı için klasör sonsuza dek "hiç işlenmemiş" gibi
+    /// kalıyordu. Bir önceki test (zayıf ama VAR olan "ÜRÜN" başlığı) hâlâ elenmeli — bu ikisi
+    /// birlikte "güvenlik ağı sadece gerçekten başlıksız tabloda devreye girer" kuralını
+    /// doğrular.</summary>
+    [Fact]
+    public void LoadCandidateCodeColumns_BasliksizTekTireliKod_TekAdayEnAzGeriDonulur()
+    {
+        using var wb = new XLWorkbook();
+        var ws = wb.Worksheets.Add("Sheet1");
+        // Banner satırı: marka adı + liste başlığı + " FİYAT" — hiçbiri "kod" içermiyor.
+        ws.Cell(1, 1).Value = "MİNA MİNO";
+        ws.Cell(1, 2).Value = "2026 MEVSİMLİK FİYAT LİSTESİ";
+        ws.Cell(1, 3).Value = "FİYAT";
+
+        var rows = new (string Code, string Desc, decimal Price)[]
+        {
+            ("26-400", "2-5 YAŞ 3 İP BASKILI AKSESUARLI KIZ TAKIM", 267.75m),
+            ("26-401", "2-5 YAŞ 3 İP BASKILI AKSESUARLI KIZ TAKIM", 272.00m),
+            ("26-402", "9-24 AY 3 İP BASKILI ERKEK TAKIM", 255.00m),
+            ("26-403", "2-5 YAŞ 3 İP ÖN ROBA FİSTOLU AKSESUARLI KIZ TAKIM", 272.00m),
+        };
+        for (int i = 0; i < rows.Length; i++)
+        {
+            ws.Cell(i + 5, 1).Value = rows[i].Code;
+            ws.Cell(i + 5, 2).Value = rows[i].Desc;
+            ws.Cell(i + 5, 3).Value = rows[i].Price;
+        }
+
+        var path = Path.Combine(Path.GetTempPath(), $"pricebot_test_{Guid.NewGuid():N}.xlsx");
+        wb.SaveAs(path);
+        try
+        {
+            var candidates = ExcelPriceReader.LoadCandidateCodeColumns(path);
+
+            var kod = Assert.Single(candidates);
+            foreach (var (code, _, price) in rows)
+            {
+                Assert.True(kod.Prices.ContainsKey(code), $"Kod {code} bulunamadı — sütun sessizce elendi.");
+                Assert.Equal(price, kod.Prices[code]);
+            }
+        }
+        finally { File.Delete(path); }
+    }
+
+    /// <summary>GERÇEK VAKA (PODİUMİNİ "Price tl.xlsx", 2026-08-10): İngilizce bir sipariş-formu
+    /// şablonu ("Code"/"Description"/"Qty"/"Unit Price"/"Price"). "Code" Türkçe "kod" alt-dizesini
+    /// içermediği için hiçbir sütun kod adayı bulunamıyor, satır başlık satırı sayılmıyor ve akış
+    /// başlıksız-tablo sezgisine düşüyordu; o sezgi de "Price" (=Qty×Unit Price, Qty hiç
+    /// doldurulmadığı için HER satırda 0) sütununu "Unit Price" (gerçek fiyat) yerine seçiyordu —
+    /// hiçbir sütun ondalık içermediği için (tam sayı fiyatlar) eski kod basitçe en sağdaki sayısal
+    /// sütunu alıyordu. Sonuç: kod doğru bulunuyor ama fiyat hep 0, üretimde 27 gerçek ürün
+    /// fotoğrafı müşteriye $0,00 damgalanıp gönderildi. Bu test hem "Code" başlığının artık
+    /// tanınmasını hem de sıfır-sütun güvenlik ağının başlıksız yola da uygulandığını doğrular.</summary>
+    [Fact]
+    public void LoadPricesFromExcel_IngilizceSiparisFormuSablonu_UnitPriceSutunuSeçilirPriceDegil()
+    {
+        using var wb = new XLWorkbook();
+        var ws = wb.Worksheets.Add("Sheet1");
+        ws.Cell(1, 1).Value = "Code";
+        ws.Cell(1, 2).Value = "Description";
+        ws.Cell(1, 3).Value = "Qty";
+        ws.Cell(1, 4).Value = "Unit Price";
+        ws.Cell(1, 5).Value = "Price";
+
+        var rows = new (string Code, int UnitPrice)[]
+        {
+            ("2512", 218),
+            ("1010", 190),
+            ("922", 190),
+            ("943", 274),
+        };
+        for (int i = 0; i < rows.Length; i++)
+        {
+            ws.Cell(i + 2, 1).Value = rows[i].Code;
+            // Description ve Qty gerçek dosyada olduğu gibi BOŞ bırakılıyor.
+            ws.Cell(i + 2, 4).Value = rows[i].UnitPrice;
+            ws.Cell(i + 2, 5).Value = 0; // "Price" = Qty(boş/0) × Unit Price -> her zaman 0
+        }
+
+        var path = Path.Combine(Path.GetTempPath(), $"pricebot_test_{Guid.NewGuid():N}.xlsx");
+        wb.SaveAs(path);
+        try
+        {
+            var prices = ExcelPriceReader.LoadPricesFromExcel(path);
+            foreach (var (code, unitPrice) in rows)
+            {
+                Assert.True(prices.ContainsKey(code), $"Kod {code} sözlükte yok.");
+                Assert.Equal(unitPrice, prices[code]);
+                Assert.NotEqual(0m, prices[code]);
+            }
+        }
+        finally { File.Delete(path); }
+    }
+
+    /// <summary>"Barcode" (İngilizce) da tıpkı "Barkod" gibi hiçbir zaman kod sütunu adayı
+    /// olmamalı — "code" alt-dizesini içerdiği için barkod istisnası eklenmezse yanlışlıkla
+    /// öncelik 2 alıp gerçek "Code" sütunuyla birlikte (hatta onun önünde) aday sayılırdı.</summary>
+    [Fact]
+    public void LoadCandidateCodeColumns_BarcodeBasligiHicbirZamanAdayOlmaz()
+    {
+        using var wb = new XLWorkbook();
+        var ws = wb.Worksheets.Add("Sheet1");
+        ws.Cell(1, 1).Value = "Code";
+        ws.Cell(1, 2).Value = "Barcode";
+        ws.Cell(1, 3).Value = "Price";
+
+        ws.Cell(2, 1).Value = "6250";
+        ws.Cell(2, 2).Value = "2023965262502";
+        ws.Cell(2, 3).Value = 490.00m;
+
+        var path = Path.Combine(Path.GetTempPath(), $"pricebot_test_{Guid.NewGuid():N}.xlsx");
+        wb.SaveAs(path);
+        try
+        {
+            var candidates = ExcelPriceReader.LoadCandidateCodeColumns(path);
+
+            var code = Assert.Single(candidates);
+            Assert.Equal("Code", code.HeaderName);
+            Assert.True(code.Prices.ContainsKey("6250"));
+            Assert.DoesNotContain(candidates, c => c.HeaderName == "Barcode");
+        }
+        finally { File.Delete(path); }
+    }
+
+    /// <summary>DetectPriceColumn'ın sıfır-sütun güvenlik ağını İZOLE test eder: başlıklar
+    /// ("Item"/"Notes"/"Count"/"Rate"/"Amount") "kod"/"code"/"fiyat"/"price"/"tutar" gibi HİÇBİR
+    /// anahtar kelimeye uymuyor, bu yüzden akış kaçınılmaz olarak başlıksız-tablo sezgisine
+    /// düşüyor (yukarıdaki PODİUMİNİ testi "Code"/"Price" ile Fix#1'i de devreye soktuğu için
+    /// bu yolu tam izole etmiyordu). "Amount" (=Count×Rate, Count boş olduğu için hep 0) en
+    /// sağda, gerçek fiyat "Rate" ondan önce — DetectPriceColumn'ın "en sağdaki sayısal sütun"
+    /// tahmini sıfır-sütun kontrolü olmadan "Amount"ı seçerdi.</summary>
+    [Fact]
+    public void LoadPricesFromExcel_BasliksizTabloEnSagdakiSutunHepSifir_SolundakiGercekFiyataDuser()
+    {
+        using var wb = new XLWorkbook();
+        var ws = wb.Worksheets.Add("Sheet1");
+        ws.Cell(1, 1).Value = "Item";
+        ws.Cell(1, 2).Value = "Notes";
+        ws.Cell(1, 3).Value = "Count";
+        ws.Cell(1, 4).Value = "Rate";
+        ws.Cell(1, 5).Value = "Amount";
+
+        var rows = new (string Code, int Rate)[]
+        {
+            ("2512", 218),
+            ("1010", 190),
+            ("922", 190),
+            ("943", 274),
+        };
+        for (int i = 0; i < rows.Length; i++)
+        {
+            ws.Cell(i + 2, 1).Value = rows[i].Code;
+            ws.Cell(i + 2, 4).Value = rows[i].Rate;
+            ws.Cell(i + 2, 5).Value = 0;
+        }
+
+        var path = Path.Combine(Path.GetTempPath(), $"pricebot_test_{Guid.NewGuid():N}.xlsx");
+        wb.SaveAs(path);
+        try
+        {
+            var prices = ExcelPriceReader.LoadPricesFromExcel(path);
+            foreach (var (code, rate) in rows)
+            {
+                Assert.True(prices.ContainsKey(code), $"Kod {code} sözlükte yok.");
+                Assert.Equal(rate, prices[code]);
+                Assert.NotEqual(0m, prices[code]);
+            }
+        }
+        finally { File.Delete(path); }
+    }
+
     /// <summary>v11 (2026-08-06): Descriptions, kod/fiyat dışındaki serbest-metin hücrelerini
     /// (ör. "Malın Cinsi") birleştirip saklar — FullScanOcr'ın yaş-aralığı/aile-stili çapraz
     /// doğrulaması bunu kullanır. SADECE RAKAMDAN oluşan hücreler ("Sıra No", "Miktar") hariç

@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
@@ -8,9 +8,9 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- Kopya değil, gerçek üretim dosyaları: IOcrEngine/OcrEngineFactory kablolamasını
-         gerçekten test etmek için (bkz. Program.cs). -->
-    <Compile Include="..\..\FullScanOcr.cs" />
+    <!-- Kopya değil, gerçek üretim dosyaları: fix'in gerçek görsellerle uçtan uca doğrulanması
+         için (bkz. Program.cs). FullScanOcr.cs/Tesseract 2026-08-07'de kaldırıldı, artık sadece
+         PaddleOCR yolu var. -->
     <Compile Include="..\..\ExcelPriceReader.cs" />
     <Compile Include="..\..\BrandMatcher.cs" />
     <Compile Include="..\..\IOcrEngine.cs" />
@@ -27,9 +27,7 @@
     <PackageReference Include="Sdcb.PaddleInference.runtime.win64.mkl" Version="3.0.1" />
     <PackageReference Include="Sdcb.PaddleOCR" Version="3.0.1" />
     <PackageReference Include="Sdcb.PaddleOCR.Models.Local" Version="3.0.1" />
-    <PackageReference Include="SkiaSharp" Version="2.88.8" />
     <PackageReference Include="System.Text.Encoding.CodePages" Version="10.0.10" />
-    <PackageReference Include="Tesseract" Version="5.2.0" />
   </ItemGroup>
 
 </Project>
