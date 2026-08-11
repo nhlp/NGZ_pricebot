@@ -56,7 +56,15 @@ namespace PriceBotPipeline;
 /// gerektiriyor); `gemini-flash-lite-latest` (Flash ailesinde ama farklı bir takma ad) hem canlı
 /// testte doğru çalıştı hem ücretsiz kaldı. 429 (kota)/5xx/timeout/güvenlik engeli gibi GEÇİCİ ya
 /// da içerik-özel hatalarda yedek DENENMEZ — bunlar ikinci modelde de aynı şekilde başarısız
-/// olur ya da modelden bağımsızdır, yedek denemek sadece kotayı ikiye katlar.
+/// olur ya da modelden bağımsızdır, yedek denemek sadece kotayı ikiye katlar. **Bilinçli tek
+/// istisna** (2026-08-11, kullanıcı onayıyla, gerçek vaka: DECO 57-013): <see
+/// cref="ClassifyCodeAsync"/>'in üç aşamalı deneme zincirinin SON basamağı — aynı modele bir kez
+/// tekrar denendikten SONRA hâlâ geçici hata alınırsa yedek modele de bir kez geçilir. Kod tespiti
+/// TEK görsel + TEK istek olduğu için (markadaki gibi "sıradaki görsel" diye bir kurtarma yolu
+/// yok) ve 503 çoğunlukla bir modelin sunucu havuzuna ÖZGÜ olabildiği için (farklı model farklı
+/// havuzda çalışabilir) burada risk/ödül dengesi farklı — bkz. <see cref="ClassifyCodeAsync"/>
+/// dosya-içi yorumu. <see cref="ClassifyBrandAsync"/> ve genel 400/404 config-hatası yedek
+/// mantığı bu istisnadan ETKİLENMEDİ, aynen "geçici hatada yedek yok" kalıyor.
 ///
 /// RESMİ/TOPLULUK BİR .NET SDK'SI KULLANILMIYOR — ham HTTP POST + System.Text.Json,
 /// Worker.cs'in bot'un kendi API'sine karşı zaten kullandığı desenle aynı (bkz.
@@ -177,17 +185,38 @@ public sealed partial class GeminiVisionClassifier
         return null;
     }
 
+    /// <summary>Geçici bir Gemini hatasından sonra AYNI görsel için tek seferlik tekrar deneme
+    /// öncesi beklenecek süre (2026-08-11). Sabit/kısa tutuldu — amaç sunucu tarafındaki anlık
+    /// "şu an yoğun" durumunun geçmesine küçük bir şans tanımak, uzun bir backoff stratejisi değil
+    /// (kota koruma ruhuyla tutarlı: tek deneme, sonsuz döngü yok).</summary>
+    private static readonly TimeSpan CodeRetryDelay = TimeSpan.FromSeconds(2);
+
     /// <summary>OCR'ın (kod taraması) tek bir görselde Excel kodlarından hiçbiriyle eşleşen bir
     /// aday bulamadığı durumda son çare ürün kodu tespiti (2026-08-10). Marka tespitinden farklı
     /// olarak TEK görsel + TEK istektir — kod görsele özgüdür, marka gibi klasör genelinde sabit
-    /// değil, "tekrar deneyecek aynı kodlu başka görsel" kavramı yok.
+    /// değil, "tekrar deneyecek aynı kodlu başka görsel" kavramı yok. TAM bu yüzden geçici bir
+    /// hatada (503/timeout/ağ) "sıradaki görsele geç" stratejisi (ClassifyBrandAsync'in yaptığı)
+    /// burada işe yaramaz — kod klasör genelinde sabit olmadığı için sıradaki görsel bu görselin
+    /// kodunu bulamaz. Bu yüzden 2026-08-11'de eklenen ÜÇ aşamalı deneme zinciri (gerçek vaka:
+    /// DECO 57-013 kodlu bir katalog görseli, klasördeki EŞLEŞMEYEN SON görseldi — devre kesicinin
+    /// "sonraki görseller için Gemini yine denenecek" güvencesinin hiçbir faydası olmadı, çünkü
+    /// tekrar denenecek başka görsel yoktu; üstelik OCR'ın okuduğu adaylar da kod ile hiç
+    /// örtüşmüyordu, yani Gemini tek gerçek şanstı):
+    /// 1) birincil model (<c>_model</c>);
+    /// 2) O geçici hatayla başarısız olursa, kısa bir bekleme (<see cref="CodeRetryDelay"/>)
+    ///    sonrası AYNI modele AYNI görsel için tekrar deneme (anlık "şu an yoğun" dalgalanmasına
+    ///    karşı);
+    /// 3) O DA geçici hatayla başarısız olursa, son çare olarak yedek modele (<c>_fallbackModel</c>)
+    ///    TEK seferlik geçiş (503 sıkça bir modelin sunucu havuzuna ÖZGÜ olabiliyor — farklı model
+    ///    farklı havuzda çalıştığı için birincil hâlâ tıkalıyken bile yanıt verebilir; kullanıcı
+    ///    onayıyla, dosya başı "YEDEK MODEL ZİNCİRİ" notundaki "geçici hatada yedek denenmez"
+    ///    kuralının SADECE bu üçüncü basamak için bilinçli istisnası).
     /// <c>ApiFailed=true</c> döndüğünde çağıran taraf (Worker.cs) o klasördeki KALAN görseller
     /// için Gemini kod tespitini atlamalı (devre kesici — aynı kota/config duvarına klasördeki her
     /// görsel için ayrı ayrı çarpmamak için). SADECE kalıcı hatalarda (429 kota, 400/404 config)
-    /// true döner — geçici hatalarda (503/timeout/ağ, 2026-08-10 gerçek vaka: bir "model şu anda
-    /// yoğun" 503'ü devre kesiciyi tetikleyip aynı klasördeki 2 sağlam görseli gereksiz atlatmıştı)
-    /// false döner: bu TEK görsel "bulunamadı" gibi atlanır ama devre açık kalır, sonraki görsel
-    /// için Gemini yine denenir.</summary>
+    /// true döner — geçici hatalarda (503/timeout/ağ) üç deneme de başarısız kalırsa false döner:
+    /// bu TEK görsel "bulunamadı" gibi atlanır ama devre açık kalır, sonraki görsel için Gemini
+    /// yine denenir.</summary>
     public async Task<(string? Code, bool ApiFailed)> ClassifyCodeAsync(
         string imagePath,
         IReadOnlyCollection<string> candidateCodes,
@@ -200,11 +229,26 @@ public sealed partial class GeminiVisionClassifier
         _logger.LogInformation("Gemini görü tespiti: ürün kodu için soruluyor -> {File}", Path.GetFileName(imagePath));
         var result = await ClassifyLabelAsync([imagePath], codes, CodeUserPrompt, CodeSystemPrompt, ct);
 
+        if (result.Label is null && result.IsTransientFailure)
+        {
+            _logger.LogInformation("Gemini görü tespiti: '{File}' için geçici bir hata alındı, {Delay} sn sonra AYNI modele ({Model}) tekrar denenecek.",
+                Path.GetFileName(imagePath), CodeRetryDelay.TotalSeconds, _model);
+            await Task.Delay(CodeRetryDelay, ct);
+            result = await ClassifyLabelAsync([imagePath], codes, CodeUserPrompt, CodeSystemPrompt, ct);
+        }
+
+        if (result.Label is null && result.IsTransientFailure && _fallbackModel != _model)
+        {
+            _logger.LogInformation("Gemini görü tespiti: '{File}' için ikinci deneme de geçici hatayla başarısız oldu, son çare olarak yedek modele ({Fallback}) geçiliyor.",
+                Path.GetFileName(imagePath), _fallbackModel);
+            result = await ClassifyLabelAsync([imagePath], codes, CodeUserPrompt, CodeSystemPrompt, ct, modelOverride: _fallbackModel);
+        }
+
         if (result.Label is null)
         {
             if (result.IsTransientFailure)
             {
-                _logger.LogInformation("Gemini görü tespiti: '{File}' için geçici bir hata alındı, bu görsel atlanacak ama klasördeki sonraki görseller için Gemini yine denenecek.", Path.GetFileName(imagePath));
+                _logger.LogInformation("Gemini görü tespiti: '{File}' için tüm denemelerden sonra da geçici bir hata alındı, bu görsel atlanacak ama klasördeki sonraki görseller için Gemini yine denenecek.", Path.GetFileName(imagePath));
                 return (null, ApiFailed: false);
             }
             return (null, ApiFailed: true); // kalıcı hata (kota/config) — devre kesiciyi tetikle
@@ -232,10 +276,15 @@ public sealed partial class GeminiVisionClassifier
     /// kapalı-liste (enum) zorlamalı isteği kurar, gönderir, `{"value": "..."}` etiketini
     /// ayrıştırır. Dönüş: gerçek bir aday (enum zorlaması sayesinde <paramref name="candidateLabels"/>
     /// içinde birebir), "BULUNAMADI", ya da <c>Label=null</c> (görsel hazırlanamadı / API-ağ hatası /
-    /// engellendi / parse hatası — bkz. <see cref="LabelResult"/>).</summary>
+    /// engellendi / parse hatası — bkz. <see cref="LabelResult"/>).
+    /// <paramref name="modelOverride"/> (2026-08-11, sadece <see cref="ClassifyCodeAsync"/>'in
+    /// üçüncü/son denemesi kullanır): verilirse birincil model (<c>_model</c>) ve onun 400/404
+    /// konfigürasyon-hatası yedek-model mantığı TAMAMEN atlanır, istek DOĞRUDAN bu modele gider —
+    /// çağıran taraf zaten hangi modeli istediğine kendi karar vermiştir.</summary>
     private async Task<LabelResult> ClassifyLabelAsync(
         List<string> imagePaths, List<string> candidateLabels,
-        string userPrompt, string systemPrompt, CancellationToken ct)
+        string userPrompt, string systemPrompt, CancellationToken ct,
+        string? modelOverride = null)
     {
         List<GeminiPart> imageParts;
         try
@@ -255,8 +304,8 @@ public sealed partial class GeminiVisionClassifier
         var requestBody = BuildRequest(imageParts, candidateLabels, userPrompt, systemPrompt);
         var json = JsonSerializer.Serialize(requestBody, GeminiJsonContext.Default.GeminiRequest);
 
-        var result = await SendClassifyRequestAsync(_model, json, ct);
-        if (!result.Success && result.IsModelConfigError && _fallbackModel != _model)
+        var result = await SendClassifyRequestAsync(modelOverride ?? _model, json, ct);
+        if (modelOverride is null && !result.Success && result.IsModelConfigError && _fallbackModel != _model)
         {
             // Birincil model KALICI bir konfigürasyon hatası verdi (400/404 — "model yok"/
             // "artık desteklenmiyor" gibi, geçici bir kota/ağ sorunu DEĞİL) — bkz. dosya başı
