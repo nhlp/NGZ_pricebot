@@ -46,6 +46,20 @@ public static class BrandMatcher
         "CLUB", "CLUP", "GIRL", "GIRLS", "BOY", "BOYS", "WEAR", "COLLECTION",
         "CLASS", "LOVE", "JUNIOR", "GOLD", "STAR", "SPORT", "LIFE", "TIME",
         "HAPPY", "LITTLE", "FAMILY",
+        // "KIDSWEAR" (2026-08-11, gerçek vaka): "KIDS" ve "WEAR" ayrı ayrı jenerik, ama
+        // birleşik yazıldığında ("Kids Wear" logosunun altındaki tagline'ı OCR boşluksuz tek
+        // kelime olarak okuyunca, ör. Messinho/Deco etiketlerinde) kelime-eşitliği kontrolü
+        // bunu görmüyordu. Onlarca üretici logosunda "... Kids Wear" jenerik alt-yazı olarak
+        // geçiyor (marka adının kendisi değil); bu yüzden "ARD KİDSWEAR" gibi TEK ayırt edici
+        // kelimesi "KIDSWEAR" olan bir marka, kendi ürünü hiç gelmese bile başka bir markanın
+        // tag'indeki bu jenerik tagline'dan yanlışlıkla "bulundu" sayılıyordu (gerçek vaka:
+        // ALİSA PİYASA MEVSİMLİK klasöründe DECO SPORT + MESSINHO ürünleri karışık geldi, her
+        // ikisinin de logosu "... Kids Wear" tagline'ı taşıyor, OCR birini "KIDSWEAR" tek
+        // token olarak okuyunca ARD KİDSWEAR de üçüncü çelişkili aday olarak sisteme girdi).
+        // Not: bu, ARD KİDSWEAR'ı MİNİ CLUP ile aynı kategoriye sokuyor (tüm kelimeleri
+        // jenerik marka, OCR ile asla otomatik eşleşmez, akış WhatsApp sorusuna düşer) — bilinçli
+        // bir taviz, yanlış markaya yönlendirmemek yanlış hiç bulamamaktan daha güvenli.
+        "KIDSWEAR",
     };
 
     private static bool IsDistinctive(string word) =>

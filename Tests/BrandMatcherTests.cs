@@ -129,6 +129,26 @@ public class BrandMatcherTests
     }
 
     [Fact]
+    public void Ocr_KidswearTagline_BaskaMarkayiYanlisEslestirmez()
+    {
+        // Gerçek vaka (2026-08-11): DECO SPORT + MESSINHO ürünlerinin karışık geldiği bir
+        // klasörde, ikisinin de logosundaki jenerik "... Kids Wear" tagline'ı OCR'dan boşluksuz
+        // "KIDSWEAR" tek token olarak okununca, listede TAMAMEN ilgisiz bir "ARD KİDSWEAR"
+        // markası (tek ayırt edici kelimesi KIDSWEAR) farklı NetCarpan'la üçüncü çelişkili aday
+        // olarak devreye giriyordu. "DECO SPORT" gerçek kanıtla (DECO+SPORT aynı satırda) tek
+        // başına net eşleşmeli, ARD KİDSWEAR'ın bu tesadüfi tagline'dan bulaşmaması gerekir.
+        var brands = new List<BrandMultiplier>
+        {
+            new("DECO", "DECO SPORT", 1.126151m),
+            new("ARD", "ARD KİDSWEAR", 1.211154m),
+        };
+        var outcome = BrandMatcher.MatchFromOcrTokens(
+            Tokens(("DECO SPORT", 95f), ("KIDSWEAR", 99f)), brands);
+        Assert.Equal("DECO SPORT", outcome.Brand?.FullName);
+        Assert.Empty(outcome.AmbiguousNames);
+    }
+
+    [Fact]
     public void Ocr_AyniAdaNormalizeOlanAyniCarpanlilar_BelirsizlikYaratmaz()
     {
         // MINITIX ve MİNİTİX normalize edilince aynı ad; çarpanları da aynı.

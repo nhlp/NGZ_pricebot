@@ -1,0 +1,89 @@
+C:\PriceBot\PriceBot.Worker\Spike\BrandProbe\brandprobe.csproj : warning NU1510: PackageReference System.Text.Encoding.CodePages ayıklanmayacak. Bu paketi bağımlılıklarınızdan kaldırmayı düşünün, çünkü muhtemelen gereksizdir.
+C:\PriceBot\PriceBot.Worker\Spike\BrandProbe\brandprobe.csproj : warning NU1603: brandprobe, Sdcb.PaddleInference.runtime.win64.mkl (>= 3.0.1) öğesine bağlı ancak Sdcb.PaddleInference.runtime.win64.mkl 3.0.1 bulunamadı. Bunun yerine Sdcb.PaddleInference.runtime.win64.mkl 3.1.0.54 çözümlendi.
+C:\PriceBot\PriceBot.Worker\Spike\BrandProbe\brandprobe.csproj : warning NU1510: PackageReference System.Text.Encoding.CodePages ayıklanmayacak. Bu paketi bağımlılıklarınızdan kaldırmayı düşünün, çünkü muhtemelen gereksizdir.
+C:\PriceBot\PriceBot.Worker\Spike\BrandProbe\brandprobe.csproj : warning NU1603: brandprobe, Sdcb.PaddleInference.runtime.win64.mkl (>= 3.0.1) öğesine bağlı ancak Sdcb.PaddleInference.runtime.win64.mkl 3.0.1 bulunamadı. Bunun yerine Sdcb.PaddleInference.runtime.win64.mkl 3.1.0.54 çözümlendi.
+Marka listesi: 311 satır (310 geçerli, 1 NetCarpan<=0 elendi).
+
+Excel: 20260807_150242822_47391a_ALİSA PİYASA MEVSİMLİK.xlsx
+65 görsel bulundu.
+
+PaddleOCR motoru kuruluyor...
+Motor hazır (1,9 sn).
+
+Kod taraması bitti (116,1 sn).
+
+Birleşik token sayısı (kod taramasından): 460
+
+--- Kod-taraması token'larıyla ilk MatchFromOcrTokens ---
+  SONUÇ: Brand='DECO SPORT' NetCarpan=1,126151 Approximate=False Evidence=[DECO, SPORT]
+
+SuggestBrandsFromOcrTokens (yakınlık tahmini, sadece Brand==null && Ambiguous==0 ise kullanılır): DECO SPORT, LOYAX KİDS WEAR, İRAY KİDS, ELİSS GİRL WEAR, DEFNE BABY KİDS
+
+=== Worker.cs'in WhatsApp sorusuna koyacağı seçenekler ===
+DECO SPORT, LOYAX KİDS WEAR, İRAY KİDS, ELİSS GİRL WEAR, DEFNE BABY KİDS
+(kaynak: yakınlık tahmini (SuggestBrandsFromOcrTokens))
+
+=== İlgilenilen markaların kelimeleri için ham token eşleşmeleri ===
+DECO SPORT (NetCarpan=1,126151) kelimeleri: DECO + SPORT
+  'DECO' -> 'DECO'(conf=100), 'DECO SPORT'(conf=95), 'DECO DECODECODECODECODECODECODECO DECODECODECODECDECDE'(conf=91), 'DECO DECO DECODECODECO DECODECO DECO DECO DECODECODECODECDE'(conf=90), 'DECO DECO DECODECODECO DECODECO DECO DECO DECODECODECODECDE'(conf=90)
+  'SPORT' -> 'DECO SPORT'(conf=95)
+MESSINHO (NetCarpan=1,126151) kelimeleri: MESSINHO
+  'MESSINHO' -> 'MESSINHO'(conf=95)
+ARD KİDSWEAR (NetCarpan=1,211154) kelimeleri: ARD + KIDSWEAR
+  'ARD' -> (hiç token'da yok)
+  'KIDSWEAR' -> 'KIDSWEAR'(conf=99)
+
+=== En yüksek güvenli 40 ham token (referans) ===
+  DETAIL (conf=100)
+  26-944 (conf=100)
+  ELBISE (conf=100)
+  27-923 (conf=100)
+  27-921 (conf=100)
+  27-779 (conf=100)
+  COLOUR (conf=100)
+  26-309 (conf=100)
+  27-837 (conf=100)
+  27-868 (conf=100)
+  CODE (conf=100)
+  27-183 (conf=100)
+  27-932 (conf=100)
+  27-924 (conf=100)
+  27-922 (conf=100)
+  26-346 (conf=100)
+  26-327 (conf=100)
+  26-340 (conf=100)
+  26-348 (conf=100)
+  TAKIM (conf=100)
+  ATELIER (conf=100)
+  26-910 (conf=100)
+  27-821 (conf=100)
+  27-820 (conf=100)
+  26-369 (conf=100)
+  27-819 (conf=100)
+  27-822 (conf=100)
+  YOU (conf=100)
+  27-189 (conf=100)
+  27-186 (conf=100)
+  NORDIC (conf=100)
+  27-103 (conf=100)
+  DECO (conf=100)
+  27-930 (conf=100)
+  27-869 (conf=100)
+  27-824 (conf=100)
+  27-818 (conf=100)
+  27-192 (conf=100)
+  26-158 (conf=100)
+  27-778 (conf=100)
+
+=== Hangi görsel(ler) 'MESSINHO' / 'KIDSWEAR' / 'ARD' token'ını ürettі ===
+'MESSINHO':
+    gorsel_20260807_150223383_e5a001.jpg -> 'MESSINHO' (conf=94)
+    gorsel_20260807_150234741_d6b3d2.jpg -> 'MESSINHO' (conf=91)
+    gorsel_20260807_150236549_0c616a.jpg -> 'MESSINHO' (conf=95)
+'KIDSWEAR':
+    gorsel_20260807_150219983_028b04.jpg -> 'KIDSWEAR' (conf=74)
+    gorsel_20260807_150221146_01a482.jpg -> 'KIDSWEAR' (conf=81)
+    gorsel_20260807_150224631_d8d272.jpg -> 'KIDSWEAR' (conf=99)
+    gorsel_20260807_150229643_97a611.jpg -> 'KIDSWEAR' (conf=74)
+    gorsel_20260807_150234901_589573.jpg -> 'KIDSWEAR' (conf=76)
+'ARD':
