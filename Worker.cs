@@ -147,12 +147,22 @@ public class Worker : BackgroundService
         // bu yüzden thread-safety sorunu yok. Maliyet düşük — dev makinede ölçüldü: OS dosya cache'i
         // ısındıktan sonra 3 örneği paralel kurmak ~2 sn (ilk/soğuk kurulum ~9 sn), 10 sn'lik tarama
         // döngüsü içinde ihmal edilebilir. İki bağımsız tetikleyici var (biri yeter):
-        // (1) OcrRecycleHours süresi dolması (varsayılan 1 saat — maliyet düşük olduğu için sık
-        //     tutuldu), (2) OcrRecycleMemoryMb eşiği — Task Manager'da görülenle AYNI metrik
-        //     (Process.WorkingSet64), büyüme hızı öngörülenden farklı çıkarsa saatlik zamanlayıcıyı
-        //     beklemeden tepki verir. İkisi de appsettings.json'dan ayarlanabilir (rebuild gerekmez);
-        //     <= 0 verilirse ilgili tetikleyici kapanır.
-        var ocrRecycleHours = config["OcrRecycleHours"]?.GetValue<double>() ?? 1.0;
+        // (1) OcrRecycleHours süresi dolması, (2) OcrRecycleMemoryMb eşiği — Task Manager'da
+        //     görülenle AYNI metrik (Process.WorkingSet64), büyüme hızı öngörülenden farklı çıkarsa
+        //     zamanlayıcıyı beklemeden tepki verir — bu ASIL güvenlik ağı. İkisi de
+        //     appsettings.json'dan ayarlanabilir (rebuild gerekmez); <= 0 verilirse ilgili tetikleyici
+        //     kapanır.
+        // OcrRecycleHours varsayılanı 2026-08-11'de 1 saatten 6 saate çıkarıldı: üretimde 9,5 saat
+        // boyunca (10 ardışık saatlik yenileme logu) çalışma belleği hep 1,2-1,6 GB bandında kaldı,
+        // 2048 MB eşiğine hiç yaklaşmadı — yani zamanlayıcı tetiklendiğinde bellek tetikleyicisi zaten
+        // hiçbir zaman devrede olmadı, saatlik yenilemenin fiilen bir işe yaramadığı (sadece log
+        // satırı + ~2-9 sn'lik gereksiz Dispose/rebuild) gözlemlendi. Bu, 2026-08-08 parallelism/
+        // cacheCapacity düzeltmesinin (bkz. [[project_ocr_parallelism_memory_fix]]) native bellek
+        // büyümesini gerçekten durdurduğunu doğruluyor. Zamanlayıcı TAMAMEN kaldırılmadı (0 yapılmadı)
+        // — birkaç günlük/haftalık çok yavaş bir sızıntı ihtimaline karşı ucuz bir sigorta olarak
+        // kalsın diye — ama sıklığı, asıl koruma zaten bellek eşiğinden geldiği için 6 kata düşürüldü
+        // (log gürültüsü ve gereksiz rebuild sayısı da aynı oranda azalır).
+        var ocrRecycleHours = config["OcrRecycleHours"]?.GetValue<double>() ?? 6.0;
         // 2GB (2026-08-08, kullanıcı geri bildirimi): yenileme neredeyse bedavaya geldiği için
         // ("düşük maliyet" yukarıdaki not) eşiği yüksek tutmanın faydası yok — mümkün olduğunca
         // düşük tutup sunucuyu sürekli düşük bellek baskısında bırakmak tercih edildi. 6GB (ilk
@@ -797,30 +807,39 @@ public class Worker : BackgroundService
             return (ocrOutcome.Brand, $"görsel OCR (kanıt: {string.Join(" ", ocrOutcome.MatchedWords)}{approxNote})");
         }
 
-        // Son çare: OCR (kod taraması + renk-duyarlı kurtarma) hiçbir marka bulamadıysa
-        // (AmbiguousNames de boşsa — çelişkili/birden fazla marka eşleşmesi durumunda bu adım
-        // ATLANIR, o akış aynen aşağıdaki WhatsApp sorusuna düşer) Claude yerine Google Gemini'nin
-        // görü modeline (2026-08-10, ücretsiz katman) kapalı marka listesiyle son bir şans
-        // verilir — bkz. GeminiBrandClassifier.cs dosya başı yorumu (resim-logo/aşırı dekoratif
-        // font vakası, hiçbir OCR'ın çözemediği durum). GeminiApiKey boşsa ClassifyAsync hiçbir
-        // ağ isteği atmadan null döner, davranış hiç değişmez.
-        if (ocrOutcome.AmbiguousNames.Count == 0)
+        // Son çare: OCR (kod taraması + renk-duyarlı kurtarma) markayı ya HİÇ bulamadı ya da
+        // ÇELİŞKİLİ biçimde birden fazla (farklı çarpanlı) marka buldu — WhatsApp'a sormadan
+        // önce Google Gemini'nin görü modeline (2026-08-10, ücretsiz katman) kapalı marka
+        // listesiyle son bir şans verilir — bkz. GeminiVisionClassifier.cs dosya başı yorumu
+        // (resim-logo/aşırı dekoratif font vakası, hiçbir OCR'ın çözemediği durum). GeminiApiKey
+        // boşsa ClassifyBrandAsync hiçbir ağ isteği atmadan null döner, davranış hiç değişmez.
+        //
+        // 2026-08-11 GENİŞLETME (kullanıcı isteği): eskiden bu adım SADECE ocrOutcome.
+        // AmbiguousNames boşken ("hiç bulamadım") çalışırdı; "çelişkili birden fazla marka"
+        // durumu bilinçli olarak atlanıp direkt WhatsApp sorusuna düşülürdü (risk almama
+        // tercihiydi, ilk sürümde kapsam dar tutulmuştu). Artık HER İKİ durumda da Gemini önce
+        // denenir: gerçek bir vaka (bkz. CLAUDE.md "KIDSWEAR" notu) çelişkili eşleşmelerin çoğu
+        // zaman OCR gürültüsünden (ör. iki markanın ortak jenerik tagline'ının üçüncü, alakasız
+        // bir markayla tesadüfen çakışması) kaynaklandığını gösterdi — görü modeli harf
+        // okumadığı için bu tür OCR-özgü tuzaklara düşmüyor, asıl görsele bakıp doğrudan karar
+        // verebiliyor. Gemini de bulamazsa (ya da kapalıysa) davranış aynı: WhatsApp sorusu.
+        var visionFiles = scans.Take(4).Select(s => s.File).ToList();
+        var visionResult = await geminiClassifier.ClassifyBrandAsync(visionFiles, brandList, ct);
+        if (visionResult is not null)
         {
-            var visionFiles = scans.Take(4).Select(s => s.File).ToList();
-            var visionResult = await geminiClassifier.ClassifyBrandAsync(visionFiles, brandList, ct);
-            if (visionResult is not null)
-            {
-                _logger.LogInformation("Klasör {Folder}: Gemini görü modeli markayı buldu: {Brand}",
-                    folder, visionResult.Value.Brand.FullName);
-                return (visionResult.Value.Brand, $"Gemini görü modeli (etiket: '{visionResult.Value.RawLabel}')");
-            }
-            _logger.LogInformation("Klasör {Folder}: Gemini görü modeli de marka bulamadı (veya kapalı), kullanıcıya sorulacak.", folder);
+            _logger.LogInformation("Klasör {Folder}: Gemini görü modeli markayı buldu: {Brand}",
+                folder, visionResult.Value.Brand.FullName);
+            return (visionResult.Value.Brand, $"Gemini görü modeli (etiket: '{visionResult.Value.RawLabel}')");
         }
 
         if (ocrOutcome.AmbiguousNames.Count > 0)
         {
-            _logger.LogWarning("Klasör {Folder}: OCR birden fazla çelişkili (farklı çarpanlı) marka buldu ({Brands}), kullanıcıya sorulacak.",
+            _logger.LogWarning("Klasör {Folder}: OCR birden fazla çelişkili (farklı çarpanlı) marka buldu ({Brands}), Gemini de çözemedi, kullanıcıya sorulacak.",
                 folder, string.Join(", ", ocrOutcome.AmbiguousNames));
+        }
+        else
+        {
+            _logger.LogInformation("Klasör {Folder}: Gemini görü modeli de marka bulamadı (veya kapalı), kullanıcıya sorulacak.", folder);
         }
 
         // Soru metnine Excel adı eklenir: çoklu marka gönderimi gruplara bölündüğünde aynı numaraya
