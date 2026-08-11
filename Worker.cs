@@ -460,7 +460,7 @@ public class Worker : BackgroundService
                     // vermezse gönderene WhatsApp'tan marka sorulur ve klasör, bot cevabı
                     // marka_cevap.txt olarak yazana kadar bekletilir (islendi.txt yazılmaz).
                     var brandResolution = await ResolveFolderBrandAsync(
-                        http, folder, senderPhone, Path.GetFileName(excelFile), ocrPool, scans, brandList, excludedBrands, geminiClassifier, stoppingToken);
+                        http, folder, senderPhone, excelFile, Path.GetFileName(excelFile), ocrPool, scans, brandList, excludedBrands, geminiClassifier, stoppingToken);
                     if (brandResolution is null) continue;
                     var (brand, brandSource) = brandResolution.Value;
                     _logger.LogInformation("Klasör markası: {Brand} (NetCarpan={Carpan}, kaynak: {Source})",
@@ -695,6 +695,7 @@ public class Worker : BackgroundService
         HttpClient http,
         string folder,
         string senderPhone,
+        string excelPath,
         string excelName,
         OcrEnginePool ocrPool,
         List<(string File, ScanResult Scan)> scans,
@@ -807,12 +808,38 @@ public class Worker : BackgroundService
             return (ocrOutcome.Brand, $"görsel OCR (kanıt: {string.Join(" ", ocrOutcome.MatchedWords)}{approxNote})");
         }
 
-        // Son çare: OCR (kod taraması + renk-duyarlı kurtarma) markayı ya HİÇ bulamadı ya da
-        // ÇELİŞKİLİ biçimde birden fazla (farklı çarpanlı) marka buldu — WhatsApp'a sormadan
-        // önce Google Gemini'nin görü modeline (2026-08-10, ücretsiz katman) kapalı marka
-        // listesiyle son bir şans verilir — bkz. GeminiVisionClassifier.cs dosya başı yorumu
-        // (resim-logo/aşırı dekoratif font vakası, hiçbir OCR'ın çözemediği durum). GeminiApiKey
-        // boşsa ClassifyBrandAsync hiçbir ağ isteği atmadan null döner, davranış hiç değişmez.
+        // Excel letterhead marka taraması (2026-08-11, gerçek vaka: PRETTY LİFE): OCR (kod
+        // taraması + renk kurtarma) markayı bulamadı/çelişkili buldu. Gemini'ye (ağ çağrısı,
+        // gecikme+kota) başvurmadan önce, bazı üretici Excel'lerinin kod/fiyat başlığından
+        // ÖNCEKİ satırlarında duran firma adı/logo yanı metnine ("PRETTY LİFE TEKSTİL İNŞ...")
+        // bakılır — ücretsiz ve deterministik. Gerçek vakada hiçbir ürün görselinde marka adı
+        // basılı değildi (sadece jenerik tasarım ibareleri vardı), ama Excel'in üst bilgisinde
+        // gerçek metin olarak duruyordu. ExtractLetterheadTokens bilinçli olarak SADECE bu alanı
+        // tarar (ürün açıklama sütunları hariç — ALİSA/karışık-katalog riskiyle aynı sınıftaki
+        // yanlış eşleşmeyi Excel tarafında tekrarlamamak için, bkz. CLAUDE.md "KIDSWEAR" notu);
+        // aynı BrandMatcher kelime-eşleştirme + jenerik-kelime filtresi + çelişkili-NetCarpan
+        // güvenlik ağı kullanılır. Bulunamazsa/çelişkiliyse davranış hiç değişmez.
+        var letterheadOutcome = BrandMatcher.MatchFromOcrTokens(ExcelPriceReader.ExtractLetterheadTokens(excelPath), brandList);
+        if (letterheadOutcome.Brand is not null)
+        {
+            var approxNote = letterheadOutcome.Approximate ? ", yaklaşık eşleşme" : "";
+            _logger.LogInformation("Klasör {Folder}: Excel üst bilgisinde (letterhead) marka bulundu: {Brand} (kanıt: {Evidence})",
+                folder, letterheadOutcome.Brand.FullName, string.Join(" ", letterheadOutcome.MatchedWords));
+            return (letterheadOutcome.Brand, $"Excel üst bilgisi (kanıt: {string.Join(" ", letterheadOutcome.MatchedWords)}{approxNote})");
+        }
+        if (letterheadOutcome.AmbiguousNames.Count > 0)
+        {
+            _logger.LogInformation("Klasör {Folder}: Excel üst bilgisinde çelişkili (farklı çarpanlı) marka adayları bulundu ({Brands}), atlanıyor.",
+                folder, string.Join(", ", letterheadOutcome.AmbiguousNames));
+        }
+
+        // Son çare: OCR (kod taraması + renk-duyarlı kurtarma) ve Excel letterhead taraması
+        // markayı ya HİÇ bulamadı ya da ÇELİŞKİLİ biçimde birden fazla (farklı çarpanlı) marka
+        // buldu — WhatsApp'a sormadan önce Google Gemini'nin görü modeline (2026-08-10, ücretsiz
+        // katman) kapalı marka listesiyle son bir şans verilir — bkz. GeminiVisionClassifier.cs
+        // dosya başı yorumu (resim-logo/aşırı dekoratif font vakası, hiçbir OCR'ın çözemediği
+        // durum). GeminiApiKey boşsa ClassifyBrandAsync hiçbir ağ isteği atmadan null döner,
+        // davranış hiç değişmez.
         //
         // 2026-08-11 GENİŞLETME (kullanıcı isteği): eskiden bu adım SADECE ocrOutcome.
         // AmbiguousNames boşken ("hiç bulamadım") çalışırdı; "çelişkili birden fazla marka"

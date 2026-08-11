@@ -1,5 +1,6 @@
 using System.Globalization;
 using ClosedXML.Excel;
+using PriceBotPipeline;
 using Xunit;
 
 /// <summary>SizeOrAgeRangeToken hem Excel sütunu eleme (LooksLikeSizeOrAgeColumn) hem de
@@ -717,6 +718,59 @@ public class ExcelPriceReaderTests
             Assert.Equal("2-5 yaş flam pamuk düşük kol patlı", desc);
             Assert.DoesNotContain("20", desc);
             Assert.DoesNotContain(" 0", desc);
+        }
+        finally { File.Delete(path); }
+    }
+
+    /// <summary>Gerçek vaka (2026-08-11, PRETTY LİFE): bazı üretici Excel'lerinde firma adı üst
+    /// bilgide ("PRETTY LİFE TEKSTİL İNŞ...") kod/fiyat başlık satırından ÖNCEKİ bir satırda
+    /// gerçek hücre metni olarak duruyor. ExtractLetterheadTokens'ın bu satırı yakaladığını VE
+    /// BrandMatcher.MatchFromOcrTokens ile gerçekten marka eşleşmesi üretebildiğini doğrular
+    /// (uçtan uca entegrasyon) — ayrıca başlıktan SONRAKİ (ürün açıklaması) satırlardaki metnin
+    /// hiç dahil edilmediğini de kontrol eder (ALİSA/karışık-katalog riskiyle aynı sınıftaki
+    /// yanlış eşleşmeyi Excel tarafında tekrarlamamak için kapsam bilinçli olarak dar tutuldu).</summary>
+    [Fact]
+    public void ExtractLetterheadTokens_BaslikOncesiFirmaMetni_MarkaEslesmesiBulunurAcikalamaSutunuGorulmez()
+    {
+        using var wb = new XLWorkbook();
+        var ws = wb.Worksheets.Add("Sipariş Formu");
+        ws.Cell(1, 1).Value = "PRETTY LİFE TEKSTİL İNŞ.İTH.İHR.SAN.VE TİC.LTD.ŞTİ.";
+        ws.Cell(2, 1).Value = "KOD";
+        ws.Cell(2, 2).Value = "ÜRÜN AÇIKLAMA";
+        ws.Cell(2, 3).Value = "FİYAT";
+        ws.Cell(3, 1).Value = "1365";
+        // "COOLTEX" bilinçli bir tuzak: başlık satırından SONRA (ürün açıklaması) olduğu için
+        // token'larda GÖRÜNMEMELİ, aksi halde kapsam yanlışlıkla genişlemiş demektir.
+        ws.Cell(3, 2).Value = "SUPER NAKIŞLI KOLLAR BASKILI KAĞŞONLU 3 İP TKM COOLTEX";
+        ws.Cell(3, 3).Value = 320.00m;
+
+        var path = Path.Combine(Path.GetTempPath(), $"pricebot_test_{Guid.NewGuid():N}.xlsx");
+        wb.SaveAs(path);
+        try
+        {
+            var tokens = ExcelPriceReader.ExtractLetterheadTokens(path);
+
+            Assert.Contains(tokens.Keys, k => k.Contains("PRETTY"));
+            Assert.DoesNotContain(tokens.Keys, k => k.Contains("COOLTEX"));
+
+            var brands = new List<BrandMultiplier> { new("PL", "PRETTY LİFE", 1.10m) };
+            var outcome = BrandMatcher.MatchFromOcrTokens(tokens, brands);
+            Assert.NotNull(outcome.Brand);
+            Assert.Equal("PRETTY LİFE", outcome.Brand!.FullName);
+        }
+        finally { File.Delete(path); }
+    }
+
+    /// <summary>Başlık satırı dosyanın İLK satırıysa (letterhead/banner satırı yoksa) taranacak
+    /// hiçbir satır kalmaz — boş sözlük döner, BrandMatcher'a boş geçmek zararsızdır (Brand=null).</summary>
+    [Fact]
+    public void ExtractLetterheadTokens_BaslikIlkSatirdaysa_BosSozlukDoner()
+    {
+        var path = WriteWorkbook(RealSampleRows);
+        try
+        {
+            var tokens = ExcelPriceReader.ExtractLetterheadTokens(path);
+            Assert.Empty(tokens);
         }
         finally { File.Delete(path); }
     }

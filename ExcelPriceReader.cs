@@ -97,6 +97,40 @@ public class ExcelPriceReader
     public static List<CodeColumnCandidate> LoadCandidateCodeColumns(string excelPath) =>
         LoadCandidateCodeColumns(LoadGrid(excelPath));
 
+    /// <summary>Kod/fiyat başlık satırından ÖNCEKİ satırlardaki (firma adı/logo yanı/adres/
+    /// telefon/site gibi "letterhead" alanı) tüm hücre metnini, <see cref="BrandMatcher.
+    /// MatchFromOcrTokens"/>'a doğrudan verilebilecek bir token sözlüğüne çevirir. Gerçek vaka
+    /// (2026-08-11, PRETTY LİFE): bazı üretici Excel'lerinde firma adı üst bilgide ("PRETTY
+    /// LİFE TEKSTİL İNŞ...") gerçek hücre metni olarak duruyor ama HİÇBİR ürün görselinde marka
+    /// adı basılı değil (görsellerde sadece "new adress"/"COUTURE" gibi jenerik tasarım
+    /// ibareleri var) — bu yüzden Worker.ResolveFolderBrandAsync, OCR (kod taraması + renk
+    /// kurtarma) markayı bulamadığında/çelişkili bulduğunda, Gemini'ye (ağ çağrısı,
+    /// gecikme+kota) başvurmadan önce bu ücretsiz/deterministik kaynağı dener.
+    ///
+    /// Kapsam BİLİNÇLİ olarak SADECE başlık satırından önceki satırlarla sınırlı — ürün
+    /// açıklama sütunları hiç taranmaz. Gerekçe: CLAUDE.md'deki "KIDSWEAR"/ALİSA karışık-katalog
+    /// vakasıyla aynı risk sınıfı — bir Excel'in ürün açıklamaları birden fazla üreticinin
+    /// ürününü karıştırabilir (jenerik bir tagline üçüncü, alakasız bir markayla tesadüfen
+    /// çakışabilir), oysa firma letterhead'i (gönderen/üreten firma) tek ve sabittir, çok daha
+    /// güvenilir bir kanıt kaynağıdır. Her hücre metni tek bir "token" olarak, sabit yüksek
+    /// güvenle (100 — gerçek dijital metin, OCR gürültüsü yok) eklenir; BrandMatcher zaten kendi
+    /// içinde kelimelere ayırıp (NormalizeToWords) aynı kelime-bazlı-tam-eşleşme + jenerik-kelime
+    /// filtresi + çelişkili-NetCarpan güvenlik ağını uygular. Eşleşme bulunamazsa (marka bu
+    /// alanda hiç geçmiyorsa) davranış hiç değişmez, akış Gemini'ye/WhatsApp sorusuna düşer.</summary>
+    public static Dictionary<string, float> ExtractLetterheadTokens(string excelPath)
+    {
+        var rows = LoadGrid(excelPath);
+        var (_, headerRowNumber) = LoadCandidateCodeColumnsCore(rows);
+
+        var tokens = new Dictionary<string, float>(StringComparer.Ordinal);
+        foreach (var row in rows.Where(r => r.RowNumber < headerRowNumber))
+            foreach (var text in row.Cells.Values)
+                if (!string.IsNullOrWhiteSpace(text))
+                    tokens[text] = 100f;
+
+        return tokens;
+    }
+
     /// <summary>Excel'i düz bir satır/sütun metin ızgarasına yükler — aşağıdaki kod/fiyat sütunu
     /// tespiti mantığı, veriyi hangi kütüphanenin ürettiğiyle ilgilenmeden bu ızgara üzerinden
     /// çalışır. Önce ClosedXML denenir (gerçek .xlsx/.xlsm, OOXML/ZIP tabanlı). ClosedXML bir
@@ -108,9 +142,21 @@ public class ExcelPriceReader
     /// kütüphane.</summary>
     private static List<GridRow> LoadGrid(string excelPath)
     {
+        // ClosedXML'in yol-tabanlı XLWorkbook(string) kurucusu, içerik gerçekte .xls (BIFF) olup
+        // ZIP olarak açılamadığında kendi içeride açtığı dosya akışını HER ZAMAN deterministik
+        // kapatmıyor — handle'ın sadece bir GC finalizer geçişiyle serbest kaldığı gözlemlendi
+        // (2026-08-11, ExcelPriceReaderXlsFallbackTests'te tespit edildi: xls-içerikli-ama-.xlsx-
+        // uzantılı fixture'da LoadPricesFromExcel doğru sonucu döndürüyor ama testin finally
+        // bloğundaki File.Delete "dosya başka bir process tarafından kullanılıyor" IOException'ıyla
+        // başarısız oluyordu — sızıntı bu metodun kendisinde değil, aşağıya düşülen
+        // LoadGridWithExcelDataReader tarafında da değil, sadece ClosedXML'in path-kurucusunda).
+        // Çözüm: dosyayı KENDİ açtığımız, `using` ile garantili kapanan bir FileStream üzerinden
+        // XLWorkbook'a veriyoruz — ClosedXML içeride ne yaparsa yapsın, akışın OS seviyesindeki
+        // handle'ı bu using bloğu çıkışında (başarı ya da istisna fark etmez) kesin olarak kapanır.
         try
         {
-            using var workbook = new XLWorkbook(excelPath);
+            using var stream = File.Open(excelPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+            using var workbook = new XLWorkbook(stream);
             var sheet = workbook.Worksheets.First();
             return sheet.RowsUsed()
                 .Select(r => new GridRow(r.RowNumber(),
@@ -154,7 +200,14 @@ public class ExcelPriceReader
 
     /// <summary>Başlık satırı ilk kullanılan satır olmayabilir (örn. üstte birleşik bir başlık/logo
     /// hücresi olabilir); "kod" ve "fiyat" sütunlarını içeren satır aranarak bulunur.</summary>
-    private static List<CodeColumnCandidate> LoadCandidateCodeColumns(List<GridRow> rows)
+    private static List<CodeColumnCandidate> LoadCandidateCodeColumns(List<GridRow> rows) =>
+        LoadCandidateCodeColumnsCore(rows).Candidates;
+
+    /// <summary>Asıl tespit mantığı — <see cref="LoadCandidateCodeColumns(List{GridRow})"/> ve
+    /// <see cref="ExtractLetterheadTokens"/> tarafından paylaşılır. HeaderRowNumber, çağıranın
+    /// "bu satırdan ÖNCEKİ satırlar firma letterhead'i" diye yorumlayabileceği sınırdır (başlıksız
+    /// tablolarda anchorRow.RowNumber - 1 olarak sentetik üretilir — bkz. aşağıdaki yorum).</summary>
+    private static (List<CodeColumnCandidate> Candidates, int HeaderRowNumber) LoadCandidateCodeColumnsCore(List<GridRow> rows)
     {
         GridRow? headerRow = null;
         int priceCol = -1;
@@ -247,7 +300,7 @@ public class ExcelPriceReader
                 .FirstOrDefault();
             var anchorRow = (modeCount.HasValue ? sample.FirstOrDefault(r => r.Cells.Count == modeCount) : null)
                 ?? rows.FirstOrDefault();
-            if (anchorRow is null) return [];
+            if (anchorRow is null) return ([], 0);
 
             // headerRow.RowNumber, "bu satırdan SONRAKİ satırlar veridir" sınırı olarak kullanılıyor
             // (aşağıdaki paylaşılan döngü) — anchorRow genelde GERÇEK bir veri satırı olduğu için
@@ -297,7 +350,7 @@ public class ExcelPriceReader
         if (result.Count == 0 && wasHeaderless && codeColumnHeaders.Count > 0)
             result = BuildCandidates(applySizeOrAgeFilter: false);
 
-        return result;
+        return (result, headerRow.RowNumber);
 
         List<CodeColumnCandidate> BuildCandidates(bool applySizeOrAgeFilter)
         {
