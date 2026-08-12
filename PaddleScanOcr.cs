@@ -6,20 +6,19 @@
 // belgelenmiş Baby Flamindo dekoratif-logo vakasında (bkz. CLAUDE.md "Marka OCR kalibrasyonu")
 // Tesseract'ın özel min-RGB kurtarma taraması gerektirdiği "FLAMINDO" yazısı, PaddleOCR'da normal
 // taramada %99 güvenle doğrudan okundu (9/9 gerçek görsel). Bu yüzden bu dosyada Tesseract'ın
-// preprocessing fonksiyonlarının HİÇBİRİ yok — sadece PaddleOcrAll.Run + aynı aday çıkarma/
-// eşleştirme/fuzzy/yaş-aralığı mantığı.
+// preprocessing fonksiyonlarının HİÇBİRİ yok — sadece PaddleOcrAll.Run + native/Paddle'a bağımlı
+// kurulum (constructor, Scan). Motor-bağımsız aday çıkarma/eşleştirme/fuzzy/yaş-aralığı mantığı
+// (2026-08-12'de) ayrı bir partial dosyaya taşındı: PaddleScanOcrMatching.cs — OpenCvSharp/Paddle'a
+// bağımlı olmadığı için Tests projesine doğrudan dahil edilip birim testlerle doğrulanabiliyor
+// (bkz. o dosyanın başı, "57-099/57-097 vakası").
 //
-// Aday çıkarma/eşleştirme (ExtractCandidates, MatchExact, ComputeFuzzyCandidates, yaş-aralığı v11
-// tie-break, Levenshtein) FullScanOcr.cs'teki (v9-v11, kanıtlanmış) algoritmayla BİREBİR aynıdır —
-// motor bağımsız oldukları için kasıtlı olarak buraya kopyalandı, FullScanOcr.cs'e HİÇ dokunulmadı.
-// Amaç buydu: appsettings.json'da "OcrEngine": "Tesseract" yazıp servisi yeniden başlatarak eski
-// motora risksiz dönüş. 2026-08-08 DÜZELTME: bu geri dönüş yolu artık ÇALIŞMIYOR — Tesseract
-// dosyaları (FullScanOcr.cs dahil) `375f080`'de tamamen silindi ve Worker.cs'in "OcrEngine" config
-// okuma/motor seçme kodu da onunla birlikte kaldırıldı (bu yorum satırı unutulmuştu, güncellenmedi).
-// appsettings.json'da hâlâ bir "OcrEngine" anahtarı görürseniz (üretimde "Paddle" olarak bulundu,
-// 2026-08-08) o dönemden kalma ÖLÜ bir alandır, hiçbir kod okumuyor — silinmesi zararsızdır. Gerçek
-// bir Tesseract'a dönüş gerekirse `git checkout checkpoint/dual-ocr-engines` ile o dönemki
-// Worker.cs/OcrEngineFactory.cs'e bakılıp switch mantığı elle geri getirilmeli.
+// Eski geri-dönüş notu (artık geçersiz, tarihi referans olarak bırakıldı): appsettings.json'da
+// "OcrEngine": "Tesseract" yazıp Tesseract'a dönme yolu 2026-08-08'de `375f080` ile TAMAMEN
+// kaldırıldı (FullScanOcr.cs dahil silindi, Worker.cs'in motor seçme kodu da kalktı).
+// appsettings.json'da hâlâ bir "OcrEngine" anahtarı görürseniz o dönemden kalma ÖLÜ bir alandır,
+// hiçbir kod okumuyor — silinmesi zararsızdır. Gerçek bir Tesseract'a dönüş gerekirse
+// `git checkout checkpoint/dual-ocr-engines` ile o dönemki Worker.cs/OcrEngineFactory.cs'e
+// bakılıp switch mantığı elle geri getirilmeli.
 //
 // EŞ ZAMANLILIK NOTU (2026-08-07, gerçek Worker koşusuyla bulundu): OcrEnginePool, Tesseract'ın
 // modeline göre (N bağımsız TesseractEngine, her biri kendi thread'inde) tasarlanmıştı — ama
@@ -42,21 +41,11 @@ using Sdcb.PaddleInference;
 using Sdcb.PaddleOCR;
 using Sdcb.PaddleOCR.Models;
 
-public sealed class PaddleScanOcr : IOcrEngine
+public sealed partial class PaddleScanOcr : IOcrEngine
 {
     private readonly QueuedPaddleOcrAll _queue;
     private readonly bool _ownsQueue;
     private readonly Regex _candidate;
-
-    private static readonly (char From, char To)[] Confusions =
-    [
-        ('O', '0'), ('D', '0'), ('Q', '0'),
-        ('I', '1'), ('L', '1'),
-        ('S', '5'),
-        ('B', '8'),
-        ('Z', '2'),
-        ('G', '6'),
-    ];
 
     /// <summary>"Sahip" örnek: paylaşılan kuyruğu kurar (consumerCount adanmış thread ile) ve
     /// Dispose'da kapatır. OcrEngineFactory bunu havuzdaki TEK bir yuva için çağırır.
@@ -137,7 +126,7 @@ public sealed class PaddleScanOcr : IOcrEngine
         IReadOnlyDictionary<string, string>? descriptions = null)
     {
         var tokens = Scan(imagePath);
-        var extracted = ExtractCandidates(tokens);
+        var extracted = ExtractCandidates(tokens, _candidate);
         var matches = MatchExact(extracted, excelCodes);
         var candidates = extracted.Keys.ToList();
 
@@ -208,230 +197,9 @@ public sealed class PaddleScanOcr : IOcrEngine
         return tokens;
     }
 
-    // ---- Aşağısı motor-bağımsız aday çıkarma/eşleştirme mantığı (eski FullScanOcr.cs'in
-    // Tesseract kaldırıldıktan sonra hayatta kalan kısmı, bkz. IOcrEngine.cs dosya başı notu) ----
-
-    private Dictionary<string, float> ExtractCandidates(Dictionary<string, float> tokens)
-    {
-        var extracted = new Dictionary<string, float>();
-        foreach (var (word, conf) in tokens)
-        {
-            // Tire'li token'ın kendisi ("26-158", "98-104" gibi) HER ZAMAN ayrı bir aday olarak
-            // denenir — aşağıdaki SizeOrAgeRangeToken filtresinden bilinçli olarak ETKİLENMEZ
-            // (bkz. TryExtractHyphen yorumu).
-            TryExtractHyphen(word, conf, extracted);
-
-            // Harf önekli kod ("V-029" gibi) da HER ZAMAN ayrı bir aday olarak denenir — yapısal
-            // olarak bir harfle başladığı için SizeOrAgeRangeToken (saf rakam) ile asla çakışmaz,
-            // aşağıdaki filtreden bilinçli olarak ETKİLENMEZ (bkz. TryExtractLetterPrefix yorumu).
-            TryExtractLetterPrefix(word, conf, extracted);
-
-            // Beden/yaş listesi ("134-140-146-152", "98-104" gibi) SAF RAKAM alt-dizisi
-            // çıkarımına asla girmez (2026-08-03 vakası: "98-104" -> "104" gibi tesadüfi bir
-            // rakam dizisi başka bir ürün koduyla yanlışlıkla eşleşebiliyordu).
-            if (SizeOrAgeRangeToken.IsMatch(word)) continue;
-
-            TryExtract(word, conf, extracted);
-
-            var normalized = Normalize(word);
-            if (normalized != word)
-            {
-                TryExtractHyphen(normalized, conf * 0.95f, extracted);
-                TryExtractLetterPrefix(normalized, conf * 0.95f, extracted);
-                if (!SizeOrAgeRangeToken.IsMatch(normalized))
-                    TryExtract(normalized, conf * 0.95f, extracted);
-            }
-        }
-        return extracted;
-    }
-
-    /// <summary>Tire'li stil-numarası kodları ("26-158", "27-958" gibi — DECO KİDS vakası,
-    /// 2026-08-07) için ek bir aday deseni. `_candidate` (appsettings'ten gelen `\d{3,7}`) tireyi
-    /// asla eşleştirmez, ama Excel'deki kod aynen tire ile saklanıyorsa (ExcelPriceReader kodu
-    /// olduğu gibi anahtarlar) saf rakam alt dizisi ("958") o kodla asla tam string eşitliği
-    /// sağlayamaz. Bilinçli olarak SizeOrAgeRangeToken filtresinin (ExtractCandidates'taki
-    /// "beden/yaş listesi" `continue`) DIŞINDA, HER token için çalıştırılır: "98-104" (gerçek
-    /// beden aralığı) ile "26-158" (gerçek ürün kodu) AYNI şekle sahiptir, şekilden ayırt
-    /// edilemez — MatchExact'ın Excel'e karşı tam-eşitlik kontrolü nihai hakemdir, burada risk
-    /// (Excel'de GERÇEKTEN o tire'li değerde bir kod olması gerekir) zaten ihmal edilebilir.</summary>
-    private static readonly Regex HyphenCandidate = new(@"\d{1,4}-\d{1,4}", RegexOptions.Compiled);
-
-    /// <summary>Tire'li kod hemen ardından başka bir rakam grubuyla (aynı OCR kutusuna birleşmiş
-    /// bir alt satır — ör. "26-347" rozetinin hemen altındaki "6-9-12-18 AY/MONTH" yaş aralığı)
-    /// boşluksuz bitişik gelirse `HyphenCandidate`'in açgözlü `\d{1,4}` grubu tire sonrasını
-    /// olması gerekenden fazla yutar: "26-3476-9-12-18" içinden TEK eşleşme olarak "26-3476"
-    /// çıkar, gerçek kod "26-347" hiç aday olmaz (gerçek vaka, 2026-08-09: DECO KIDS WEAR ürün
-    /// fotoğrafı, Excel'de "26-347" varken hiçbir görsel eşleşmedi). Çözüm: `Matches` ile TÜM
-    /// tire'li eşleşmeleri gez ve tire sonrası rakam grubunun her ÖNEKİNİ de ayrı bir aday olarak
-    /// ekle ("26-3", "26-34", "26-347", "26-3476" gibi) — hangisinin gerçek kod olduğuna yine
-    /// MatchExact'ın Excel'e karşı tam-eşitlik kontrolü karar verir, burada sadece doğru önek de
-    /// aday havuzuna girsin diye fazladan olasılıklar üretiliyor.</summary>
-    private static void TryExtractHyphen(string word, float conf, Dictionary<string, float> extracted)
-    {
-        foreach (Match m in HyphenCandidate.Matches(word))
-        {
-            var dash = m.Value.IndexOf('-');
-            var tail = m.Value[(dash + 1)..];
-            for (int len = 1; len <= tail.Length; len++)
-            {
-                var candidate = m.Value[..(dash + 1 + len)];
-                if (!extracted.TryGetValue(candidate, out var best) || conf > best)
-                    extracted[candidate] = conf;
-            }
-        }
-    }
-
-    /// <summary>Harf önekli stil-numarası kodları ("V-029", "A-102" gibi — gerçek vaka, 2026-08-10:
-    /// "mini pakel" KIŞLIK ALİSA-PİYASA listesi, Excel kodları "V-025".."V-072") için ek bir aday
-    /// deseni. `_candidate` (appsettings'ten gelen `\d{3,7}`) harf içermeyen SAF rakam dizisi arar;
-    /// "V-029" token'ından yalnızca öneksiz "029" çıkar. Ama Excel'de kod TAM "V-029" string'i
-    /// olarak saklandığı için (MatchExact tam string eşitliği kontrol eder, alt-dize değil)
-    /// öneksiz "029" o kodla ASLA eşleşemez — bu şekil hiç ele alınmadığı sürece bu tür kod
-    /// ailesindeki HİÇBİR görsel eşleşmez (gerçek vakada bir Excel'in 33 görselinin TAMAMI
-    /// "ATANAMADI" kaldı). `HyphenCandidate`'in (rakam-tire-rakam) harf önekli sürümü; aynı
-    /// bitişik-token riski (bkz. TryExtractHyphen yorumu — kod rozetinin hemen altına yaş aralığı
-    /// boşluksuz bitişebilir) burada da geçerli olduğu için aynı önek-üretme stratejisi
-    /// kullanılır. Bilinçli olarak SizeOrAgeRangeToken filtresinin DIŞINDA (TryExtractHyphen ile
-    /// aynı gerekçe) — ama pratikte hiçbir zaman onunla çakışmaz, çünkü SizeOrAgeRangeToken saf
-    /// rakamla başlamak zorundadır, bu desen ise bir harfle.</summary>
-    private static readonly Regex LetterPrefixCandidate = new(@"[A-Z]{1,3}-\d{1,5}", RegexOptions.Compiled);
-
-    private static void TryExtractLetterPrefix(string word, float conf, Dictionary<string, float> extracted)
-    {
-        foreach (Match m in LetterPrefixCandidate.Matches(word))
-        {
-            var dash = m.Value.IndexOf('-');
-            var prefix = m.Value[..dash];
-            var tail = m.Value[(dash + 1)..];
-            for (int len = 1; len <= tail.Length; len++)
-            {
-                var candidate = prefix + "-" + tail[..len];
-                if (!extracted.TryGetValue(candidate, out var best) || conf > best)
-                    extracted[candidate] = conf;
-            }
-        }
-    }
-
-    private void TryExtract(string word, float conf, Dictionary<string, float> extracted)
-    {
-        var m = _candidate.Match(word);
-        if (!m.Success) return;
-        if (!extracted.TryGetValue(m.Value, out var best) || conf > best)
-            extracted[m.Value] = conf;
-    }
-
-    private static List<CodeMatch> MatchExact(Dictionary<string, float> extracted, IReadOnlySet<string> excelCodes) =>
-        extracted.Keys
-            .Where(excelCodes.Contains)
-            .Select(c => new CodeMatch(c, extracted[c]))
-            .OrderByDescending(m => m.Confidence)
-            .ToList();
-
-    private const float FuzzyMinConfidence = 40f;
-    private const int NearbyAnchorDelta = 3;
-
-    private static Dictionary<string, (float Conf, string Candidate, bool SelfReferential)> ComputeFuzzyCandidates(
-        List<string> candidates, Dictionary<string, float> extracted,
-        IReadOnlySet<string> excelCodes, IReadOnlyList<CodeMatch> alreadyMatchedOnThisImage)
-    {
-        var anchors = alreadyMatchedOnThisImage
-            .Select(m => long.TryParse(m.Code, out var n) ? (long?)n : null)
-            .Where(n => n.HasValue)
-            .Select(n => n!.Value)
-            .ToList();
-
-        var scope = anchors.Count == 0
-            ? excelCodes
-            : excelCodes
-                .Where(code => long.TryParse(code, out var n) && anchors.Any(a => Math.Abs(a - n) <= NearbyAnchorDelta))
-                .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-        var alreadyMatchedCodes = new HashSet<string>(
-            alreadyMatchedOnThisImage.Select(m => m.Code), StringComparer.OrdinalIgnoreCase);
-
-        var found = new Dictionary<string, (float Conf, string Candidate, bool SelfReferential)>();
-
-        foreach (var code in scope)
-        {
-            foreach (var candidate in candidates)
-            {
-                if (extracted[candidate] < FuzzyMinConfidence) continue;
-                if (Math.Abs(candidate.Length - code.Length) > 1) continue;
-                if (LevenshteinDistance(candidate, code) != 1) continue;
-
-                bool selfRef = alreadyMatchedCodes.Contains(candidate);
-                if (!found.TryGetValue(code, out var existing) || extracted[candidate] > existing.Conf)
-                    found[code] = (extracted[candidate], candidate, selfRef);
-            }
-        }
-
-        return found;
-    }
-
-    private const float AgeRangeMinConfidence = 50f;
-    private static readonly Regex AgeRangeToken = new(@"^\d{1,2}([.\-]\d{1,2}){1,}$", RegexOptions.Compiled);
-
-    private static List<(int Min, int Max)> ExtractAgeRanges(Dictionary<string, float> tokens)
-    {
-        var ranges = new List<(int Min, int Max)>();
-        foreach (var (word, conf) in tokens)
-        {
-            if (conf < AgeRangeMinConfidence) continue;
-            if (!AgeRangeToken.IsMatch(word)) continue;
-
-            var parts = word.Split(['.', '-'], StringSplitOptions.RemoveEmptyEntries);
-            var numbers = new List<int>(parts.Length);
-            bool allValid = true;
-            foreach (var part in parts)
-            {
-                if (!int.TryParse(part, out var n) || n is < 0 or > 99) { allValid = false; break; }
-                numbers.Add(n);
-            }
-            if (!allValid || numbers.Count < 2) continue;
-
-            ranges.Add((numbers.Min(), numbers.Max()));
-        }
-        return ranges;
-    }
-
-    private static readonly Regex DescriptionAgeRange =
-        new(@"(\d{1,2})\s*-\s*(\d{1,2})\s*(yaş|yas|age)", RegexOptions.Compiled | RegexOptions.IgnoreCase);
-
-    private static (int Min, int Max)? ExtractAgeRangeFromDescription(string description)
-    {
-        var m = DescriptionAgeRange.Match(description);
-        if (!m.Success) return null;
-        if (!int.TryParse(m.Groups[1].Value, out var a) || !int.TryParse(m.Groups[2].Value, out var b)) return null;
-        return (Math.Min(a, b), Math.Max(a, b));
-    }
-
-    private static string StyleTextWithoutAgeRange(string description) =>
-        DescriptionAgeRange.Replace(description, "").Trim().ToUpperInvariant();
-
-    private static int LevenshteinDistance(string a, string b)
-    {
-        var dp = new int[a.Length + 1, b.Length + 1];
-        for (int i = 0; i <= a.Length; i++) dp[i, 0] = i;
-        for (int j = 0; j <= b.Length; j++) dp[0, j] = j;
-
-        for (int i = 1; i <= a.Length; i++)
-            for (int j = 1; j <= b.Length; j++)
-            {
-                int cost = a[i - 1] == b[j - 1] ? 0 : 1;
-                dp[i, j] = Math.Min(Math.Min(dp[i - 1, j] + 1, dp[i, j - 1] + 1), dp[i - 1, j - 1] + cost);
-            }
-
-        return dp[a.Length, b.Length];
-    }
-
-    private static string Normalize(string token)
-    {
-        var chars = token.ToCharArray();
-        for (int i = 0; i < chars.Length; i++)
-            foreach (var (from, to) in Confusions)
-                if (chars[i] == from) { chars[i] = to; break; }
-        return new string(chars);
-    }
+    // ---- Motor-bağımsız aday çıkarma/eşleştirme/fuzzy mantığı artık PaddleScanOcrMatching.cs'te
+    // (partial class) — OpenCvSharp/Paddle bağımlılığı olmadığı için Tests projesine doğrudan
+    // <Compile Include> ile dahil edilip birim testlerle doğrulanabiliyor (bkz. o dosyanın başı).
 
     public void Dispose() { if (_ownsQueue) _queue.Dispose(); }
 }

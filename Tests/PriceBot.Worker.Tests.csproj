@@ -29,6 +29,14 @@
          SkiaSharp 2.88.8 kullanıyor, test projesi NPOI üzerinden 3.x'e bağımlı; ikisini
          aynı derlemede birleştirmek NU1605 sürüm çakışmasına yol açardı. -->
     <Compile Include="..\GeminiVisionClassifierLabelResolver.cs" />
+    <!-- PaddleScanOcr.cs'in TAMAMI DEĞİL, sadece motor-bağımsız aday çıkarma/eşleştirme/fuzzy
+         partial'ı (bkz. PaddleScanOcrMatching.cs dosya başı yorumu) — ana dosya OpenCvSharp/
+         Sdcb.PaddleOCR'a bağımlı, bu native paketleri test projesine sürüklemeden
+         ComputeFuzzyCandidates gibi saf mantığı doğrudan test edebilmek için ayrıldı. -->
+    <Compile Include="..\PaddleScanOcrMatching.cs" />
+    <!-- IOcrEngine.cs: CodeMatch/ScanResult record'ları — PaddleScanOcrMatching.cs bunlara
+         bağımlı, native paket gerektirmiyor. -->
+    <Compile Include="..\IOcrEngine.cs" />
   </ItemGroup>
 
 </Project>
