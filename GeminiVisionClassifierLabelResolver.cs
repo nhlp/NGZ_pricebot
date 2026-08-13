@@ -1,6 +1,8 @@
+using System.Globalization;
 using System.Net;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 
 namespace PriceBotPipeline;
 
@@ -48,19 +50,105 @@ public sealed partial class GeminiVisionClassifier
         candidates.FirstOrDefault(b => string.Equals(b.FullName, label, StringComparison.Ordinal));
 
     /// <summary>SADECE HTTP 400/404 kalıcı (model'e özgü) konfigürasyon hatası sayılır — bkz.
-    /// dosya başı "YEDEK MODEL ZİNCİRİ" notu (GeminiVisionClassifier.cs). 429/5xx/timeout gibi
-    /// geçici ya da modelden bağımsız hatalarda false: yedek modele geçmek boşuna kotayı
-    /// ikiye katlar.</summary>
+    /// dosya başı "YEDEK MODEL ZİNCİRİ" notu (GeminiVisionClassifier.cs). 5xx/timeout gibi
+    /// geçici hatalarda false. 429 (kota) ARTIK burada değil — bkz. <see cref="IsQuotaError"/>,
+    /// kendi ayrı ele alışı var (2026-08-13).</summary>
     internal static bool IsModelConfigError(HttpStatusCode statusCode) =>
         statusCode is HttpStatusCode.BadRequest or HttpStatusCode.NotFound;
 
     /// <summary>GEÇİCİ (aynı istek büyük ihtimalle bir sonraki denemede başarılı olur) sayılan
     /// HTTP durumları — sadece 5xx (sunucu tarafı, "usually temporary"; gerçek vaka 2026-08-10:
-    /// "model şu anda yoğun talep görüyor" 503'ü). 429 (kota — aynı burst içinde tekrar denemek
-    /// boşuna) ve diğer 4xx (401/403 kimlik/izin gibi kalıcı sorunlar) KALICI sayılır, false döner
-    /// — bkz. GeminiVisionClassifier.cs "devre kesici" kullanımı (Worker.cs geminiCodeApiHealthy).</summary>
+    /// "model şu anda yoğun talep görüyor" 503'ü). Diğer 4xx'ler (401/403 kimlik/izin gibi kalıcı
+    /// sorunlar) KALICI sayılır, false döner. 429 (kota) bu fonksiyonun DIŞINDA — bkz.
+    /// <see cref="IsQuotaError"/>: eskiden (2026-08-10) 429 burada da "kalıcı" (false) sayılıp
+    /// diğer kalıcı hatalarla aynı işlem görüyordu (hiç tekrar denemeden devre kesiciyi tetikle),
+    /// ama gerçek vaka (2026-08-13, NGZ/MİNİCE klasörü: `generate_content_free_tier_requests`
+    /// limit:5 — bkz. GeminiVisionClassifier.cs dosya başı notu) 429'un 400/404'ten (kalıcı
+    /// config hatası) ve 5xx'ten (rastgele geçici sunucu hatası) FARKLI bir üçüncü kategori
+    /// olduğunu gösterdi: kısa bir bekleme sonrası neredeyse kesin başarılı olacak (RPM
+    /// penceresi dolar) VE Google'ın kota metriği MODELE ÖZGÜ (`model: gemini-3.6-flash` gibi)
+    /// olduğu için farklı bir modelin ayrı bir kotası olması muhtemel — bu yüzden artık kendi
+    /// ayrı bekle-ve-tekrar-dene + yedek-model mantığına sahip (bkz. GeminiVisionClassifier.cs
+    /// "devre kesici" kullanımı, Worker.cs geminiCodeApiHealthy).</summary>
     internal static bool IsTransientError(HttpStatusCode statusCode) =>
         (int)statusCode is >= 500 and < 600;
+
+    /// <summary>HTTP 429 (RESOURCE_EXHAUSTED / kota aşımı) — bkz. <see cref="IsTransientError"/>
+    /// dokümantasyonundaki 2026-08-13 notu. Kendi ayrı bayrağı var çünkü davranışı ne
+    /// <see cref="IsModelConfigError"/> (400/404, tekrar denemek anlamsız) ne de
+    /// <see cref="IsTransientError"/> (5xx, sabit kısa bekleme yeterli) ile aynı: 429'da Google
+    /// genelde makul bir bekleme süresi öneriyor (bkz. <see cref="ParseRetryDelay"/>), o süre
+    /// kadar beklemek başarı ihtimalini gerçek anlamda artırıyor (rastgele bir 5xx'te olduğu
+    /// gibi "belki düzelir" değil, "RPM penceresi kesinlikle dolacak").</summary>
+    internal static bool IsQuotaError(HttpStatusCode statusCode) =>
+        statusCode == HttpStatusCode.TooManyRequests;
+
+    private static readonly Regex RetryDelayTextPattern =
+        new(@"retry in\s+([\d.]+)\s*s", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static readonly TimeSpan MinRetryDelay = TimeSpan.FromSeconds(1);
+
+    /// <summary>Üst sınır bilinçli olarak kısa tutuldu (2026-08-13): bu, ana 10 sn'lik tarama
+    /// döngüsünü bloklayan senkron bir bekleme (Worker.cs görsel-başına damgalama akışının
+    /// içinde) — Google'ın önerdiği süre bu sınırı aşarsa (ör. günlük/RPD kotası tükenmişse çok
+    /// daha uzun bir süre önerebilir) beklemeye değmez, doğrudan kalıcı hata gibi ele alınıp
+    /// devre kesiciye düşülmesi daha sağlıklı.</summary>
+    private static readonly TimeSpan MaxRetryDelay = TimeSpan.FromSeconds(30);
+
+    /// <summary>429 yanıt gövdesinden Google'ın önerdiği bekleme süresini çıkarır. Önce
+    /// yapılandırılmış <c>google.rpc.RetryInfo</c> alanını dener (<c>error.details[].retryDelay</c>,
+    /// protobuf Duration string'i, ör. <c>"6.276786240s"</c>) — bulunursa bu en güvenilir kaynak.
+    /// Yoksa/parse edilemezse insan-okunur mesaj metnindeki ifadeyi dener (gerçek Gemini 429
+    /// yanıtında görülen biçim, 2026-08-13: <c>"Please retry in 6.27678624s."</c>). İkisi de
+    /// bulunamazsa null döner — çağıran taraf kendi sabit varsayılanına (<c>CodeRetryDelay</c>)
+    /// düşer. Sonuç her zaman <see cref="MinRetryDelay"/>/<see cref="MaxRetryDelay"/> arasına
+    /// kelepçelenir.</summary>
+    internal static TimeSpan? ParseRetryDelay(string? responseText)
+    {
+        if (string.IsNullOrEmpty(responseText)) return null;
+
+        try
+        {
+            using var doc = JsonDocument.Parse(responseText);
+            if (doc.RootElement.TryGetProperty("error", out var error) &&
+                error.TryGetProperty("details", out var details) &&
+                details.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var detail in details.EnumerateArray())
+                {
+                    if (detail.TryGetProperty("retryDelay", out var retryDelayEl) &&
+                        retryDelayEl.ValueKind == JsonValueKind.String &&
+                        TryParseDurationSeconds(retryDelayEl.GetString(), out var seconds))
+                    {
+                        return Clamp(TimeSpan.FromSeconds(seconds));
+                    }
+                }
+            }
+        }
+        catch (JsonException)
+        {
+            // Beklenmeyen/bozuk gövde — metin geri düşüşüne bırak.
+        }
+
+        var textMatch = RetryDelayTextPattern.Match(responseText);
+        if (textMatch.Success &&
+            double.TryParse(textMatch.Groups[1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var textSeconds))
+        {
+            return Clamp(TimeSpan.FromSeconds(textSeconds));
+        }
+
+        return null;
+
+        static TimeSpan Clamp(TimeSpan delay) =>
+            delay < MinRetryDelay ? MinRetryDelay : delay > MaxRetryDelay ? MaxRetryDelay : delay;
+    }
+
+    private static bool TryParseDurationSeconds(string? duration, out double seconds)
+    {
+        seconds = 0;
+        return !string.IsNullOrEmpty(duration) && duration.EndsWith('s') &&
+            double.TryParse(duration[..^1], NumberStyles.Float, CultureInfo.InvariantCulture, out seconds);
+    }
 
     /// <summary>Gemini v1beta generateContent isteğini kurar — kapalı-liste (enum) zorlaması
     /// <paramref name="candidateLabels"/> + <see cref="NotFoundLabel"/>'i responseSchema.enum'a

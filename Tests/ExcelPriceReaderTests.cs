@@ -836,4 +836,154 @@ public class ExcelPriceReaderXlsFallbackTests
         }
         finally { File.Delete(path); }
     }
+
+    /// <summary>GERÇEK VAKA (2026-08-13, NGZ "NET MEVSİMLİK FİYAT LİSTESİ 2026.xls" / MİNİCE):
+    /// kod sütunu her satırda marka adını sayısal kodun önüne metin olarak ekliyordu ("MİNİCE 6482"
+    /// gibi) ama fiziksel üründeki etikette SADECE sayı basılıydı, marka adı ayrı bir yerde
+    /// (logo/nakış). OCR doğru sayıyı ("6482") okuyordu ama tam-string eşitliği hiç sağlanamadığı
+    /// için 38 görselden 32'si "eşleşen kod bulunamadı" ile atlanmıştı (sadece Gemini görü tespiti
+    /// fallback'iyle kurtarılan 6'sı damgalanabildi). Bu test, sayısal sonek alias'ının hem tam
+    /// string ("MİNİCE 6482") hem de OCR'ın gerçekte okuduğu çıplak sayı ("6482") ile eşleşmeyi
+    /// aynı fiyata bağladığını doğrular.</summary>
+    [Fact]
+    public void LoadPricesFromExcel_MarkaOnekliKod_SayisalSonekAliasOlarakDaEslesir()
+    {
+        using var wb = new XLWorkbook();
+        var ws = wb.Worksheets.Add("Fiyat Listesi");
+        ws.Cell(1, 1).Value = "Stok kodu";
+        ws.Cell(1, 2).Value = "Stok ismi";
+        ws.Cell(1, 3).Value = "Fiyat";
+
+        ws.Cell(2, 1).Value = "MİNİCE 6482";
+        ws.Cell(2, 2).Value = "9-18-24 AY AYICIK SÜZÜNELİ ÜÇLÜ KIZ TKM";
+        ws.Cell(2, 3).Value = 320.85m;
+
+        var path = Path.Combine(Path.GetTempPath(), $"pricebot_test_{Guid.NewGuid():N}.xlsx");
+        wb.SaveAs(path);
+        try
+        {
+            var prices = ExcelPriceReader.LoadPricesFromExcel(path);
+            Assert.Equal(320.85m, prices["MİNİCE 6482"]);
+            Assert.True(prices.ContainsKey("6482"), "OCR'ın etikette gerçekten okuduğu çıplak sayı ('6482') alias olarak eklenmemiş.");
+            Assert.Equal(320.85m, prices["6482"]);
+        }
+        finally { File.Delete(path); }
+    }
+
+    /// <summary>Güvenlik ağı: iki farklı tam-kod AYNI sayısal soneke indirgenirse (gerçek bir
+    /// çakışma potansiyeli) alias eklenmemeli — belirsizlikte tam-string eşleşmesi tek geçerli yol
+    /// olarak kalmalı (yanlış fiyat basmaktansa hiç eşleşmemek tercih edilir).</summary>
+    [Fact]
+    public void LoadPricesFromExcel_MarkaOnekliKodCakisanSonek_AliasEklenmezSessizceYanlisFiyatVerilmez()
+    {
+        using var wb = new XLWorkbook();
+        var ws = wb.Worksheets.Add("Fiyat Listesi");
+        ws.Cell(1, 1).Value = "Stok kodu";
+        ws.Cell(1, 2).Value = "Fiyat";
+
+        ws.Cell(2, 1).Value = "MİNİCE 6482";
+        ws.Cell(2, 2).Value = 320.85m;
+        ws.Cell(3, 1).Value = "MİNİMİ 6482";
+        ws.Cell(3, 2).Value = 415.00m;
+
+        var path = Path.Combine(Path.GetTempPath(), $"pricebot_test_{Guid.NewGuid():N}.xlsx");
+        wb.SaveAs(path);
+        try
+        {
+            var prices = ExcelPriceReader.LoadPricesFromExcel(path);
+            Assert.Equal(320.85m, prices["MİNİCE 6482"]);
+            Assert.Equal(415.00m, prices["MİNİMİ 6482"]);
+            Assert.False(prices.ContainsKey("6482"), "İki farklı koddan çakışan bir alias sessizce eklenmiş — hangi fiyata mı bağlanacağı belirsiz.");
+        }
+        finally { File.Delete(path); }
+    }
+
+    /// <summary>Kod içinde HARF/tire varsa (parçası saf rakam DEĞİLSE) hiç alias eklenmemeli —
+    /// sadece tam-string eşleşmesi geçerli kalmalı. Aynı dosyada saf-rakam sonekli bir kodun
+    /// (alias almalı) yanında harfli/tireli soneklerin (almamalı) bulunması, filtrenin sadece
+    /// gerçekten güvenli olan durumda tetiklendiğini doğrular.</summary>
+    [Fact]
+    public void LoadPricesFromExcel_KodSonekindeHarfVeyaTireVarsaAliasEklenmez()
+    {
+        using var wb = new XLWorkbook();
+        var ws = wb.Worksheets.Add("Fiyat Listesi");
+        ws.Cell(1, 1).Value = "Stok kodu";
+        ws.Cell(1, 2).Value = "Fiyat";
+
+        ws.Cell(2, 1).Value = "MİNİCE 6482";   // saf rakam sonek -> alias almalı
+        ws.Cell(2, 2).Value = 320.85m;
+        ws.Cell(3, 1).Value = "MİNİCE 64A2";   // harfli sonek -> alias ALMAMALI
+        ws.Cell(3, 2).Value = 415.00m;
+        ws.Cell(4, 1).Value = "MİNİCE V-029";  // tireli+harfli sonek -> alias ALMAMALI
+        ws.Cell(4, 2).Value = 500.00m;
+
+        var path = Path.Combine(Path.GetTempPath(), $"pricebot_test_{Guid.NewGuid():N}.xlsx");
+        wb.SaveAs(path);
+        try
+        {
+            var prices = ExcelPriceReader.LoadPricesFromExcel(path);
+
+            Assert.Equal(3 + 1, prices.Count); // 3 tam kod + sadece 1 alias (6482)
+            Assert.Equal(320.85m, prices["6482"]);
+            Assert.False(prices.ContainsKey("64A2"), "Harf içeren bir sonek yanlışlıkla alias olarak eklenmiş.");
+            Assert.False(prices.ContainsKey("A2"));
+            Assert.False(prices.ContainsKey("029"), "Tireli/harfli bir sonekten yanlışlıkla saf-rakam parçası çıkarılmış.");
+        }
+        finally { File.Delete(path); }
+    }
+
+    /// <summary>Marka her zaman ÖNEKTE olmak zorunda değil — bazı listeler kodu ÖNCE, açıklamayı
+    /// SONRA yazabilir ("6482 MİNİCE" gibi). AddSpacedSuffixAliases hem "METİN SAYI" hem simetrik
+    /// olarak "SAYI METİN" biçimini kapsamalı; hangi taraf gerçek kod olduğu şekilden (saf rakam
+    /// mı) çıkarılır, konumdan değil.</summary>
+    [Fact]
+    public void LoadPricesFromExcel_SayiOndeMetinSondaKodBicimi_OnekAliasOlarakEklenir()
+    {
+        using var wb = new XLWorkbook();
+        var ws = wb.Worksheets.Add("Fiyat Listesi");
+        ws.Cell(1, 1).Value = "Stok kodu";
+        ws.Cell(1, 2).Value = "Fiyat";
+
+        ws.Cell(2, 1).Value = "6482 MİNİCE"; // sayı ÖNDE, marka SONDA
+        ws.Cell(2, 2).Value = 320.85m;
+
+        var path = Path.Combine(Path.GetTempPath(), $"pricebot_test_{Guid.NewGuid():N}.xlsx");
+        wb.SaveAs(path);
+        try
+        {
+            var prices = ExcelPriceReader.LoadPricesFromExcel(path);
+
+            Assert.Equal(320.85m, prices["6482 MİNİCE"]);
+            Assert.True(prices.ContainsKey("6482"), "Önekteki (sonda değil) saf rakam parçası alias olarak eklenmemiş.");
+            Assert.Equal(320.85m, prices["6482"]);
+        }
+        finally { File.Delete(path); }
+    }
+
+    /// <summary>Sayısal sonek alias'ı sadece boşluk + 3-7 haneli SAF rakam soneki olan kodlarda
+    /// devreye girmeli — "Stok ismi" gibi serbest metin açıklama sütunları ("... KIZ TKM" gibi
+    /// harfle biten değerler) hiç etkilenmemeli, aksi halde description sütunu şişer/gürültü artar.</summary>
+    [Fact]
+    public void LoadCandidateCodeColumns_SerbestMetinSutunu_SayisalSonekAliasUretmez()
+    {
+        using var wb = new XLWorkbook();
+        var ws = wb.Worksheets.Add("Fiyat Listesi");
+        ws.Cell(1, 1).Value = "Stok kodu";
+        ws.Cell(1, 2).Value = "Stok ismi";
+        ws.Cell(1, 3).Value = "Fiyat";
+
+        ws.Cell(2, 1).Value = "MİNİCE 6482";
+        ws.Cell(2, 2).Value = "9-18-24 AY AYICIK SÜZÜNELİ ÜÇLÜ KIZ TKM";
+        ws.Cell(2, 3).Value = 320.85m;
+
+        var path = Path.Combine(Path.GetTempPath(), $"pricebot_test_{Guid.NewGuid():N}.xlsx");
+        wb.SaveAs(path);
+        try
+        {
+            var candidates = ExcelPriceReader.LoadCandidateCodeColumns(path);
+            var stokIsmi = candidates.Single(c => c.HeaderName == "Stok ismi");
+            Assert.DoesNotContain(stokIsmi.Prices.Keys, k => k.All(char.IsDigit));
+        }
+        finally { File.Delete(path); }
+    }
 }

@@ -91,10 +91,13 @@ public class GeminiVisionClassifierTests
     }
 }
 
-/// <summary>Yedek-model zincirinin karar mantığı: SADECE HTTP 400/404 kalıcı bir konfigürasyon
-/// hatası sayılır (bkz. CLAUDE.md "YEDEK MODEL ZİNCİRİ" — 2026-08-10 canlı testte `gemini-2.5-flash`
-/// sabit adının gerçekten 404 verdiği doğrulandı). 429 (kota — canlı testte "limit: 0" görülen Pro
-/// katmanı vakası dahil) ve 5xx'te yedek DENENMEMELİ.</summary>
+/// <summary>Yedek-model zincirinin karar mantığı: SADECE HTTP 400/404 <see cref="IsModelConfigError"/>
+/// sayılır (bkz. CLAUDE.md "YEDEK MODEL ZİNCİRİ" — 2026-08-10 canlı testte `gemini-2.5-flash` sabit
+/// adının gerçekten 404 verdiği doğrulandı). 429 burada hâlâ false — ama 2026-08-13'ten beri bu
+/// "yedek denenmez" anlamına GELMİYOR, kendi ayrı <see cref="IsQuotaError"/> yolundan (aşağıda)
+/// yedek deniyor (bkz. GeminiVisionClassifier.cs "429 (KOTA) ARTIK..." notu, gerçek vaka: NGZ/
+/// MİNİCE `limit: 5`). Sadece 5xx hâlâ "ne config-hatası ne kota, kendi IsTransientError yolundan
+/// sabit bekleme ile tekrar dene" kategorisinde.</summary>
 public class GeminiVisionClassifierIsModelConfigErrorTests
 {
     [Theory]
@@ -107,6 +110,126 @@ public class GeminiVisionClassifierIsModelConfigErrorTests
     public void KaliciKonfigurasyonHatalariDogruSiniflandirilir(HttpStatusCode status, bool expected)
     {
         Assert.Equal(expected, GeminiVisionClassifier.IsModelConfigError(status));
+    }
+}
+
+/// <summary>GERÇEK VAKA (2026-08-13, NGZ "NET MEVSİMLİK FİYAT LİSTESİ 2026.xls" / MİNİCE): 38
+/// görsellik bir klasörde OCR'ın marka-önekli-kod bug'ı yüzünden (bkz. AddSpacedSuffixAliases,
+/// ExcelPriceReader.cs) ~32 görsel Gemini kod tespitine düştü; 6. istekten sonra Gemini
+/// `generate_content_free_tier_requests` metriğinde `limit: 5` ile 429 döndü, devre kesici (Worker.cs
+/// geminiCodeApiHealthy) TEK bu 429'da tetiklenip kalan ~31 görsel için Gemini'yi hiç denemeden
+/// atlattı. Çözüm: 429 artık kendi ayrı <see cref="GeminiVisionClassifier.IsQuotaError"/> kategorisi
+/// — <see cref="GeminiVisionClassifier.IsModelConfigError"/>'dan (400/404) ayrı tutulur.</summary>
+public class GeminiVisionClassifierIsQuotaErrorTests
+{
+    [Theory]
+    [InlineData(HttpStatusCode.TooManyRequests, true)]
+    [InlineData(HttpStatusCode.BadRequest, false)]
+    [InlineData(HttpStatusCode.NotFound, false)]
+    [InlineData(HttpStatusCode.InternalServerError, false)]
+    [InlineData(HttpStatusCode.ServiceUnavailable, false)]
+    [InlineData(HttpStatusCode.Unauthorized, false)]
+    public void SadeceHttp429KotaSayilir(HttpStatusCode status, bool expected)
+    {
+        Assert.Equal(expected, GeminiVisionClassifier.IsQuotaError(status));
+    }
+}
+
+/// <summary>ParseRetryDelay: Google'ın 429 yanıtından önerilen bekleme süresini çıkarır — iki
+/// kaynak da gerçek Gemini yanıtlarında görülen biçimler (2026-08-13, NGZ/MİNİCE canlı log'u:
+/// "Please retry in 6.27678624s." insan-okunur metni). Yapılandırılmış google.rpc.RetryInfo
+/// (error.details[].retryDelay) önceliklidir, metin ikinci sıradadır.</summary>
+public class GeminiVisionClassifierParseRetryDelayTests
+{
+    [Fact]
+    public void YapilandirilmisRetryInfoAlaniOncelikli()
+    {
+        const string json = """
+            {
+              "error": {
+                "code": 429,
+                "details": [
+                  { "@type": "type.googleapis.com/google.rpc.QuotaFailure" },
+                  { "@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "6.276786240s" }
+                ]
+              }
+            }
+            """;
+
+        var delay = GeminiVisionClassifier.ParseRetryDelay(json);
+
+        Assert.NotNull(delay);
+        Assert.Equal(6.28, delay!.Value.TotalSeconds, precision: 1);
+    }
+
+    [Fact]
+    public void YapilandirilmisAlanYoksaMesajMetniDenenir()
+    {
+        // Gerçek NGZ/MİNİCE log'unda görülen tam metin (2026-08-13).
+        const string json = """
+            {
+              "error": {
+                "code": 429,
+                "message": "You exceeded your current quota... Please retry in 6.27678624s.",
+                "status": "RESOURCE_EXHAUSTED"
+              }
+            }
+            """;
+
+        var delay = GeminiVisionClassifier.ParseRetryDelay(json);
+
+        Assert.NotNull(delay);
+        Assert.Equal(6.28, delay!.Value.TotalSeconds, precision: 1);
+    }
+
+    [Fact]
+    public void NeYapilandirilmisAlanNeMetinVarsaNullDoner()
+    {
+        const string json = """{ "error": { "code": 429, "message": "quota exceeded" } }""";
+
+        Assert.Null(GeminiVisionClassifier.ParseRetryDelay(json));
+    }
+
+    [Fact]
+    public void BozukJsonMetinYoluylaYineDeCozulur()
+    {
+        // JSON parse başarısız olsa bile ("bozuk gövde"), insan-okunur metin fallback'i çalışmalı.
+        var delay = GeminiVisionClassifier.ParseRetryDelay("{ bozuk json ama retry in 3.5s yaziyor");
+
+        Assert.NotNull(delay);
+        Assert.Equal(3.5, delay!.Value.TotalSeconds, precision: 1);
+    }
+
+    [Fact]
+    public void BosVeyaNullMetinNullDoner()
+    {
+        Assert.Null(GeminiVisionClassifier.ParseRetryDelay(null));
+        Assert.Null(GeminiVisionClassifier.ParseRetryDelay(""));
+    }
+
+    [Fact]
+    public void CokKisaOnerilenSureAsgariSinirinAltinaDusmez()
+    {
+        const string json = """{ "error": { "message": "Please retry in 0.05s." } }""";
+
+        var delay = GeminiVisionClassifier.ParseRetryDelay(json);
+
+        Assert.NotNull(delay);
+        Assert.True(delay!.Value.TotalSeconds >= 1.0, "Aşırı kısa bir öneri (ör. RPM penceresinin son anı) hemen art arda ikinci bir 429'a yol açabilir.");
+    }
+
+    [Fact]
+    public void CokUzunOnerilenSureUstSinirinUstuneCikmaz()
+    {
+        // Ana 10 sn'lik tarama döngüsünü bloklayan senkron bir bekleme olduğu için (bkz.
+        // ParseRetryDelay dosya-içi yorumu) çok uzun bir öneriye (ör. günlük kota) körü körüne
+        // uyulmamalı.
+        const string json = """{ "error": { "message": "Please retry in 3600s." } }""";
+
+        var delay = GeminiVisionClassifier.ParseRetryDelay(json);
+
+        Assert.NotNull(delay);
+        Assert.True(delay!.Value.TotalSeconds <= 30.0);
     }
 }
 

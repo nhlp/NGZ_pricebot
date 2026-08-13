@@ -485,11 +485,18 @@ public class Worker : BackgroundService
                             chosen[idx] = scans[idx].Scan.Matches;
                     }
 
-                    // Klasör başına devre kesici (2026-08-10): bir kod tespiti Gemini API/ağ
-                    // hatasıyla (kota vb.) başarısız olursa, aynı duvara klasördeki HER görsel için
-                    // ayrı ayrı çarpmamak adına kalan görseller için Gemini kod tespiti atlanır —
-                    // sabit bir sayı sınırı yerine, hata görülene kadar dener, görülünce durur (bkz.
-                    // GeminiVisionClassifier.ClassifyCodeAsync dosya başı yorumu).
+                    // Klasör başına devre kesici (2026-08-10): bir kod tespiti Gemini'den ApiFailed=
+                    // true dönerse, aynı duvara klasördeki HER görsel için ayrı ayrı çarpmamak adına
+                    // kalan görseller için Gemini kod tespiti atlanır — sabit bir sayı sınırı yerine,
+                    // hata görülene kadar dener, görülünce durur. 2026-08-13 güncellemesi: ApiFailed
+                    // artık "ilk 429 (kota)" ile eş anlamlı DEĞİL — ClassifyCodeAsync kota aşımında
+                    // önce Google'ın önerdiği süre kadar bekleyip aynı modele, sonra yedek modele
+                    // tekrar dener; ApiFailed=true SADECE bu tüm zincir (bekleme+birincil+yedek)
+                    // tükendikten SONRA ya da 400/404/içerik-engeli gibi gerçekten kalıcı bir hatada
+                    // dönüyor (bkz. GeminiVisionClassifier.ClassifyCodeAsync/ClassifyLabelAsync dosya
+                    // başı yorumu — gerçek vaka: NGZ/MİNİCE klasörü, `limit: 5` kota duvarı 6.
+                    // istekten sonra devre kesiciyi TEK 429'da tetikleyip kalan ~31 görseli hiç
+                    // denemeden atlatmıştı).
                     var geminiCodeApiHealthy = true;
 
                     // Aşama 3: sonuçlara göre damgala/gönder.
