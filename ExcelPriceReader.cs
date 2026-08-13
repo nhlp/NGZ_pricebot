@@ -401,6 +401,8 @@ public class ExcelPriceReader
                     }
                 }
 
+                AddSpacedSuffixAliases(prices, descriptions);
+
                 if (prices.Count > 0)
                     candidates.Add(new CodeColumnCandidate(name, col, priority, prices, skippedRows, descriptions));
             }
@@ -523,6 +525,70 @@ public class ExcelPriceReader
 
         return true;
     }
+
+    /// <summary>Marka-önekli/sonekli kod desteği (2026-08-13, gerçek vaka: NGZ "NET MEVSİMLİK
+    /// FİYAT LİSTESİ 2026.xls" / MİNİCE): bazı Excel listelerinde kod sütunu her satırda marka
+    /// adını sayısal kodun ÖNÜNE metin olarak ekliyor ("MİNİCE 6482", "MİNİCE 6410" gibi) — ama
+    /// fiziksel üründeki etikette SADECE sayı basılı, marka adı ayrı bir yerde (logo/nakış, marka
+    /// OCR'ı ondan kanıt buluyor). OCR bu yüzden doğru sayıyı ("6482") okuyor ama <see
+    /// cref="MatchExact"/> (Excel'e karşı TAM string eşitliği) hiçbir zaman eşleşmiyor — "6482" !=
+    /// "MİNİCE 6482". Gerçek vakada 38 görselden sadece 6'sı (hepsi Gemini görü tespiti
+    /// fallback'iyle) damgalanabildi, kalan 32'si OCR'ın doğru okuduğu sayıya rağmen "eşleşen kod
+    /// bulunamadı" ile atlandı.
+    ///
+    /// Çözüm: her kod hücresinin İLK ve SON boşlukla ayrılmış parçası ayrı ayrı denenir — hangisi
+    /// 3-7 haneli SAF rakamsa (harf/tire İÇERMEYEN — "64A2", "V-029" gibi soneklere alias
+    /// eklenmez, sadece tam-string eşleşmesi geçerli kalır, yanlış eşleştirme riski yok) o parça
+    /// ikinci bir anahtar (alias) olarak aynı fiyata eklenir. Bu, hem "METİN SAYI" (marka önde,
+    /// gerçek vaka) hem simetrik olarak "SAYI METİN" (sayı önde, ör. "6482 MİNİCE") biçimini
+    /// kapsar — hangi taraf marka hangi taraf kod olduğu ÖNEKİN içeriğinden değil, şeklinden
+    /// (saf rakam mı) çıkarılıyor, bu yüzden markanın önek mi sonek mi olduğu koda özgü olabilir,
+    /// tüm satırlarda AYNI konumda/AYNI metin olması ŞART DEĞİL. Mevcut hiçbir anahtar
+    /// SİLİNMEZ/ÜZERİNE YAZILMAZ, bu yüzden geriye dönük regresyon riski yok (sadece yeni eşleşme
+    /// imkânı eklenir). Güvenlik ağı: iki farklı tam-kod AYNI sayısal alias'a indirgenirse (gerçek
+    /// bir çakışma potansiyeli, örn. iki farklı marka/model aynı "123" ile bitiyorsa) VEYA alias
+    /// zaten Excel'de kendi başına ayrı bir gerçek kod olarak varsa, o alias hiç eklenmez — sadece
+    /// tam-string eşleşmesi geçerli kalır (Barkod/Tutarı güvenlik ağlarıyla aynı "belirsizlikte
+    /// ele" ruhu).</summary>
+    private static void AddSpacedSuffixAliases(Dictionary<string, decimal> prices, Dictionary<string, string> descriptions)
+    {
+        var aliasSourceCode = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var conflicts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        void RegisterAlias(string alias, string sourceCode)
+        {
+            if (prices.ContainsKey(alias)) { conflicts.Add(alias); return; }
+            if (aliasSourceCode.TryGetValue(alias, out var existingCode))
+            {
+                if (prices[existingCode] != prices[sourceCode]) conflicts.Add(alias);
+                return;
+            }
+            aliasSourceCode[alias] = sourceCode;
+        }
+
+        foreach (var code in prices.Keys.ToList())
+        {
+            int firstSpace = code.IndexOf(' ');
+            int lastSpace = code.LastIndexOf(' ');
+            if (firstSpace <= 0) continue; // hiç boşluk yok — alias'a gerek yok, tek token zaten
+
+            var trailing = code[(lastSpace + 1)..];
+            if (IsPlausibleNumericAlias(trailing)) RegisterAlias(trailing, code);
+
+            var leading = code[..firstSpace];
+            if (leading != trailing && IsPlausibleNumericAlias(leading)) RegisterAlias(leading, code);
+        }
+
+        foreach (var (alias, sourceCode) in aliasSourceCode)
+        {
+            if (conflicts.Contains(alias)) continue;
+            prices[alias] = prices[sourceCode];
+            if (descriptions.TryGetValue(sourceCode, out var desc)) descriptions[alias] = desc;
+        }
+    }
+
+    private static bool IsPlausibleNumericAlias(string token) =>
+        token.Length is >= 3 and <= 7 && token.All(char.IsDigit);
 
     /// <summary>Bir fiyat sütunu adayının veri satırlarında en az bir sıfırdan farklı, geçerli
     /// fiyat olup olmadığını kontrol eder. "Tutarı" gibi formül sütunları (fiyat × miktar) miktar

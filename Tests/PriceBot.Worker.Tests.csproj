@@ -28,7 +28,16 @@
          kısmı (bkz. GeminiVisionClassifierLabelResolver.cs dosya başı yorumu) — ana dosya
          SkiaSharp 2.88.8 kullanıyor, test projesi NPOI üzerinden 3.x'e bağımlı; ikisini
          aynı derlemede birleştirmek NU1605 sürüm çakışmasına yol açardı. -->
+    <!-- RetryDelayParser.cs: Gemini/Groq/Anthropic'in 429 yanıt metnini paylaşılan ayrıştırıcısı,
+         hiçbir native/SkiaSharp bağımlılığı yok. -->
+    <Compile Include="..\RetryDelayParser.cs" />
     <Compile Include="..\GeminiVisionClassifierLabelResolver.cs" />
+    <!-- AnthropicVisionClassifier.cs'in TAMAMI DEĞİL, sadece saf/network-SkiaSharp'sız partial
+         kısmı — GeminiVisionClassifierLabelResolver.cs ile AYNI gerekçe (yukarıdaki yorum). -->
+    <Compile Include="..\AnthropicVisionClassifierLabelResolver.cs" />
+    <!-- GroqVisionClassifier.cs'in TAMAMI DEĞİL, sadece saf/network-SkiaSharp'sız partial kısmı —
+         AYNI gerekçe (yukarıdaki yorum). -->
+    <Compile Include="..\GroqVisionClassifierLabelResolver.cs" />
     <!-- PaddleScanOcr.cs'in TAMAMI DEĞİL, sadece motor-bağımsız aday çıkarma/eşleştirme/fuzzy
          partial'ı (bkz. PaddleScanOcrMatching.cs dosya başı yorumu) — ana dosya OpenCvSharp/
          Sdcb.PaddleOCR'a bağımlı, bu native paketleri test projesine sürüklemeden

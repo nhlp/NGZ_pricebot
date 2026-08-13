@@ -115,6 +115,39 @@ public class Worker : BackgroundService
         var geminiFallbackModel = config["GeminiBrandModelFallback"]?.GetValue<string>() ?? "gemini-flash-lite-latest";
         var geminiClassifier = new GeminiVisionClassifier(geminiApiKey, geminiModel, geminiFallbackModel, _logger);
 
+        // Kod tespiti için çoklu-sağlayıcı zinciri (2026-08-13, kullanıcı isteği: "gemini sınırını
+        // başka bir api kullanarak aşabilir miyiz" — gerçek vaka: NGZ/MİNİCE klasöründe Gemini'nin
+        // ücretsiz katman kotası tek bir klasörde tükenmişti, bkz. GeminiVisionClassifier.cs dosya
+        // başı "429 (KOTA)" notu). ÜÇ ek, opsiyonel basamak — hepsi appsettings.json'dan boş
+        // bırakılırsa (varsayılan) tamamen kapalı, hiçbir davranış değişmez:
+        // 1. GeminiApiKeySecondary — Google Cloud'da AYRI bir proje/key (ücretsiz, GCP'nin meşru
+        //    çok-proje mekanizması — aynı hesapta birden fazla proje her biri kendi kotasına sahip
+        //    olabilir). Aynı GeminiVisionClassifier sınıfının İKİNCİ bir örneği, farklı apiKey ile.
+        // 2. GroqApiKey — Groq (bkz. GroqVisionClassifier.cs dosya başı yorumu; "Gro-Q", Google'ın
+        //    Gemini'siyle İLGİSİZ AYRI bir şirket/kota havuzu — Elon Musk'ın "Gro-K" (xAI) ile de
+        //    KARIŞTIRILMAMALI, 2026-08-13'te kullanıcı bu ikisini karıştırıp yanlışlıkla x.ai'den
+        //    ücretli bir key almıştı). Ücretsiz katman, Gemini'nin İKİ key'i de tükendiğinde devreye
+        //    girer.
+        // 3. AnthropicApiKey — Claude (bkz. AnthropicVisionClassifier.cs dosya başı yorumu),
+        //    yukarıdaki ÜÇ (ücretsiz) basamak da tükendiğinde devreye giren PARALI son çare.
+        // codeClassifiers SIRAYLA (ucuz/ücretsiz önce) denenir — bkz. Aşama 3'teki döngü ve
+        // IProductCodeClassifier.cs dosya başı yorumu.
+        var geminiApiKeySecondary = config["GeminiApiKeySecondary"]?.GetValue<string>() ?? "";
+        var geminiClassifierSecondary = new GeminiVisionClassifier(geminiApiKeySecondary, geminiModel, geminiFallbackModel, _logger);
+        var groqApiKey = config["GroqApiKey"]?.GetValue<string>() ?? "";
+        var groqModel = config["GroqModel"]?.GetValue<string>() ?? "qwen/qwen3.6-27b";
+        var groqClassifier = new GroqVisionClassifier(groqApiKey, groqModel, _logger);
+        var anthropicApiKey = config["AnthropicApiKey"]?.GetValue<string>() ?? "";
+        var anthropicModel = config["AnthropicModel"]?.GetValue<string>() ?? "claude-haiku-4-5-20251001";
+        var anthropicClassifier = new AnthropicVisionClassifier(anthropicApiKey, anthropicModel, _logger);
+        var codeClassifiers = new List<(string Source, IProductCodeClassifier Classifier)>
+        {
+            ("Gemini görü tespiti", geminiClassifier),
+            ("Gemini görü tespiti (ikincil key)", geminiClassifierSecondary),
+            ("Groq görü tespiti", groqClassifier),
+            ("Claude görü tespiti", anthropicClassifier),
+        };
+
         // PaddleOcrAll'ın altındaki native motor thread-affinity gerektirdiği için görseller
         // QueuedPaddleOcrAll'ın adanmış thread'leri üzerinden paralel taranır (bkz.
         // PaddleScanOcr.cs). Motor kurulumu pahalı olduğu için görsel başına değil, servis
@@ -485,46 +518,112 @@ public class Worker : BackgroundService
                             chosen[idx] = scans[idx].Scan.Matches;
                     }
 
-                    // Klasör başına devre kesici (2026-08-10): bir kod tespiti Gemini API/ağ
-                    // hatasıyla (kota vb.) başarısız olursa, aynı duvara klasördeki HER görsel için
-                    // ayrı ayrı çarpmamak adına kalan görseller için Gemini kod tespiti atlanır —
-                    // sabit bir sayı sınırı yerine, hata görülene kadar dener, görülünce durur (bkz.
-                    // GeminiVisionClassifier.ClassifyCodeAsync dosya başı yorumu).
-                    var geminiCodeApiHealthy = true;
+                    // Klasör başına, SAĞLAYICI BAŞINA devre kesici (2026-08-10, çoklu-sağlayıcıya
+                    // genişletildi 2026-08-13 — bkz. codeClassifiers, IProductCodeClassifier.cs):
+                    // her sağlayıcı kendi ApiFailed sinyaliyle BAĞIMSIZ olarak "bu klasörde tükendi"
+                    // işaretlenir — biri (ör. Gemini birincil key) tükense bile diğerleri (ikincil
+                    // key, Groq, Claude) klasördeki kalan görseller için denenmeye devam eder. Sabit
+                    // bir sayı sınırı yerine, hata görülene kadar dener, görülünce o sağlayıcı için
+                    // durur. ApiFailed=true KOTA (429) ile eş anlamlı DEĞİL — bkz. hemen aşağıdaki
+                    // RetryAfter notu; ApiFailed=true SADECE 400/404/içerik-engeli gibi gerçekten
+                    // kalıcı bir hatada dönüyor.
+                    var codeClassifierHealthy = new bool[codeClassifiers.Count];
+                    Array.Fill(codeClassifierHealthy, true);
 
-                    // Aşama 3: sonuçlara göre damgala/gönder.
+                    // Aşama 3.1: kod çözümleme (2026-08-13, kullanıcı isteği: kota/rate-limit'te
+                    // SENKRON beklemek yerine "diğer görselleri işlerken geçecek doğal süreyi
+                    // kullan, sonra bir kez daha dene" — gerçek vaka: Groq'un TPM (dakikada token)
+                    // sınırı, büyük bir aday-kod listesiyle SANİYELER içinde doluyor; bir görseli
+                    // onlarca saniye bloke etmek yerine sıradaki görsele geçip dönmek çok daha
+                    // verimli). Bir sağlayıcı <see cref="IProductCodeClassifier"/>'ın RetryAfter'ını
+                    // dönerse (kota/rate-limit ama KALICI DEĞİL) bu sağlayıcı bu görsel için ŞİMDİLİK
+                    // atlanır (devre kesici TETİKLENMEZ) ve SIRADAKİ sağlayıcı hemen denenir; hiçbir
+                    // sağlayıcı bulamayıp en az biri RetryAfter dönmüşse görsel "atlandı" YERİNE
+                    // deferredForRetry'e eklenir — Aşama 3.2'de tekrar denenecek.
+                    var deferredForRetry = new List<int>();
+                    for (int idx = 0; idx < scans.Count; idx++)
+                    {
+                        if (chosen.ContainsKey(idx)) continue;
+                        var (file, scan) = scans[idx];
+                        var fileName = Path.GetFileName(file);
+                        bool anyRetryAfter = false;
+
+                        // Son çare (2026-08-10, çoklu-sağlayıcıya genişletildi 2026-08-13): OCR
+                        // bu görselde Excel kodlarından hiçbiriyle eşleşen bir aday bulamadı.
+                        // Marka fallback'inin aksine burada WhatsApp'a soru YOK — kod, marka gibi
+                        // klasör genelinde sabit değil, sorulacak tek bir "doğru cevap" yok.
+                        // codeClassifiers SIRAYLA (ucuz/ücretsiz önce) denenir, ilk başarılı
+                        // sonuçta durulur; sağlığı düşen (ApiFailed) bir sağlayıcı bu görsel için
+                        // atlanır ama SIRADAKİ sağlayıcı yine denenir.
+                        for (int ci = 0; ci < codeClassifiers.Count && !chosen.ContainsKey(idx); ci++)
+                        {
+                            if (!codeClassifierHealthy[ci]) continue;
+
+                            var (source, classifier) = codeClassifiers[ci];
+                            var (code, apiFailed, retryAfter) = await classifier.ClassifyCodeAsync(file, excelCodes, stoppingToken);
+                            if (apiFailed)
+                            {
+                                codeClassifierHealthy[ci] = false;
+                                _logger.LogWarning("Klasör {Folder}: {Source} API hatası verdi, bu klasördeki kalan görseller için bu sağlayıcı atlanacak.", folder, source);
+                            }
+                            else if (retryAfter is not null)
+                            {
+                                anyRetryAfter = true;
+                            }
+                            else if (code is not null && excelPrices.ContainsKey(code))
+                            {
+                                chosen[idx] = [new CodeMatch(code, Confidence: 100, IsFuzzy: true, Source: source)];
+                                _logger.LogInformation("'{File}': OCR kodu bulamadı, {Source} buldu: {Code}", fileName, source, code);
+                            }
+                        }
+
+                        if (!chosen.ContainsKey(idx) && anyRetryAfter)
+                            deferredForRetry.Add(idx);
+                    }
+
+                    // Aşama 3.2: ertelenen görseller — Aşama 3.1'de klasördeki DİĞER görselleri
+                    // işlerken doğal olarak geçen süreden SONRA, TEK bir ek turda tekrar denenir.
+                    // Hâlâ kota/rate-limit alırsa (yeterli süre geçmediyse) üçüncü bir tur YOK —
+                    // sınırlı kalsın diye normal "atlandı" akışına düşülür (aşağıdaki Aşama 3.3).
+                    if (deferredForRetry.Count > 0)
+                    {
+                        _logger.LogInformation("Klasör {Folder}: {Count} görsel kota/rate-limit yüzünden ertelenmişti, diğer görseller işlendikten sonra tekrar deneniyor.", folder, deferredForRetry.Count);
+                        foreach (var idx in deferredForRetry)
+                        {
+                            if (chosen.ContainsKey(idx)) continue;
+                            var (file, scan) = scans[idx];
+                            var fileName = Path.GetFileName(file);
+
+                            for (int ci = 0; ci < codeClassifiers.Count && !chosen.ContainsKey(idx); ci++)
+                            {
+                                if (!codeClassifierHealthy[ci]) continue;
+
+                                var (source, classifier) = codeClassifiers[ci];
+                                var (code, apiFailed, retryAfter) = await classifier.ClassifyCodeAsync(file, excelCodes, stoppingToken);
+                                if (apiFailed)
+                                {
+                                    codeClassifierHealthy[ci] = false;
+                                    _logger.LogWarning("Klasör {Folder}: {Source} API hatası verdi, bu klasördeki kalan görseller için bu sağlayıcı atlanacak.", folder, source);
+                                }
+                                else if (code is not null && excelPrices.ContainsKey(code))
+                                {
+                                    chosen[idx] = [new CodeMatch(code, Confidence: 100, IsFuzzy: true, Source: source)];
+                                    _logger.LogInformation("'{File}': OCR kodu bulamadı, {Source} (ertelenmiş tekrar deneme) buldu: {Code}", fileName, source, code);
+                                }
+                                // retryAfter burada bilinçli olarak yok sayılır — ikinci tur da
+                                // kota/rate-limit'e takılırsa üçüncü bir erteleme yapılmaz.
+                            }
+                        }
+                    }
+
+                    // Aşama 3.3: sonuçlara göre damgala/gönder (chosen artık, ertelenenler dahil,
+                    // TAMAMEN çözümlenmiş durumda).
                     for (int idx = 0; idx < scans.Count; idx++)
                     {
                         var (file, scan) = scans[idx];
                         var fileName = Path.GetFileName(file);
 
                         if (!chosen.TryGetValue(idx, out var matches))
-                        {
-                            // Son çare (2026-08-10): OCR bu görselde Excel kodlarından hiçbiriyle
-                            // eşleşen bir aday bulamadı. Marka fallback'inin aksine burada WhatsApp'a
-                            // soru YOK — kod, marka gibi klasör genelinde sabit değil, sorulacak tek
-                            // bir "doğru cevap" yok — tek çare Gemini'nin görü tespiti (o klasörün
-                            // Excel kod listesi kapalı liste olarak verilir, halüsinasyon riski yok).
-                            // Bulursa normal damgalama akışına (aşağıda) düşer; bulamazsa/API
-                            // hatasında mevcut "atlandı" davranışı aynen sürer.
-                            if (geminiCodeApiHealthy)
-                            {
-                                var (geminiCode, apiFailed) = await geminiClassifier.ClassifyCodeAsync(file, excelCodes, stoppingToken);
-                                if (apiFailed)
-                                {
-                                    geminiCodeApiHealthy = false;
-                                    _logger.LogWarning("Klasör {Folder}: Gemini kod tespiti API hatası verdi, bu klasördeki kalan görseller için atlanacak.", folder);
-                                }
-                                else if (geminiCode is not null && excelPrices.ContainsKey(geminiCode))
-                                {
-                                    matches = [new CodeMatch(geminiCode, Confidence: 100, IsFuzzy: true, Source: "Gemini görü tespiti")];
-                                    chosen[idx] = matches;
-                                    _logger.LogInformation("'{File}': OCR kodu bulamadı, Gemini görü tespiti buldu: {Code}", fileName, geminiCode);
-                                }
-                            }
-                        }
-
-                        if (!chosen.TryGetValue(idx, out matches))
                         {
                             // Adayların rapora yazılması teşhis için kritik: "OCR mi okuyamadı,
                             // Excel'de mi yoktu" sorusu islendi.txt'ye bakarak tek seferde cevaplanır
