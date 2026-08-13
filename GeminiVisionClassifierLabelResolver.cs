@@ -2,7 +2,6 @@ using System.Globalization;
 using System.Net;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using System.Text.RegularExpressions;
 
 namespace PriceBotPipeline;
 
@@ -83,25 +82,15 @@ public sealed partial class GeminiVisionClassifier
     internal static bool IsQuotaError(HttpStatusCode statusCode) =>
         statusCode == HttpStatusCode.TooManyRequests;
 
-    private static readonly Regex RetryDelayTextPattern =
-        new(@"retry in\s+([\d.]+)\s*s", RegexOptions.IgnoreCase | RegexOptions.Compiled);
-
-    private static readonly TimeSpan MinRetryDelay = TimeSpan.FromSeconds(1);
-
-    /// <summary>Üst sınır bilinçli olarak kısa tutuldu (2026-08-13): bu, ana 10 sn'lik tarama
-    /// döngüsünü bloklayan senkron bir bekleme (Worker.cs görsel-başına damgalama akışının
-    /// içinde) — Google'ın önerdiği süre bu sınırı aşarsa (ör. günlük/RPD kotası tükenmişse çok
-    /// daha uzun bir süre önerebilir) beklemeye değmez, doğrudan kalıcı hata gibi ele alınıp
-    /// devre kesiciye düşülmesi daha sağlıklı.</summary>
-    private static readonly TimeSpan MaxRetryDelay = TimeSpan.FromSeconds(30);
-
     /// <summary>429 yanıt gövdesinden Google'ın önerdiği bekleme süresini çıkarır. Önce
     /// yapılandırılmış <c>google.rpc.RetryInfo</c> alanını dener (<c>error.details[].retryDelay</c>,
     /// protobuf Duration string'i, ör. <c>"6.276786240s"</c>) — bulunursa bu en güvenilir kaynak.
-    /// Yoksa/parse edilemezse insan-okunur mesaj metnindeki ifadeyi dener (gerçek Gemini 429
-    /// yanıtında görülen biçim, 2026-08-13: <c>"Please retry in 6.27678624s."</c>). İkisi de
-    /// bulunamazsa null döner — çağıran taraf kendi sabit varsayılanına (<c>CodeRetryDelay</c>)
-    /// düşer. Sonuç her zaman <see cref="MinRetryDelay"/>/<see cref="MaxRetryDelay"/> arasına
+    /// Yoksa/parse edilemezse <see cref="RetryDelayParser.ParseFromText"/> ile insan-okunur mesaj
+    /// metnindeki ifadeyi dener (gerçek Gemini 429 yanıtında görülen biçim, 2026-08-13:
+    /// <c>"Please retry in 6.27678624s."</c> — Groq'un AYNI amaçlı "try again in Xs" ifadesiyle
+    /// PAYLAŞILAN regex, bkz. RetryDelayParser.cs). İkisi de bulunamazsa null döner — çağıran
+    /// taraf kendi sabit varsayılanına (<c>CodeRetryDelay</c>) düşer. Sonuç her zaman
+    /// <see cref="RetryDelayParser.MinDelay"/>/<see cref="RetryDelayParser.MaxDelay"/> arasına
     /// kelepçelenir.</summary>
     internal static TimeSpan? ParseRetryDelay(string? responseText)
     {
@@ -120,7 +109,7 @@ public sealed partial class GeminiVisionClassifier
                         retryDelayEl.ValueKind == JsonValueKind.String &&
                         TryParseDurationSeconds(retryDelayEl.GetString(), out var seconds))
                     {
-                        return Clamp(TimeSpan.FromSeconds(seconds));
+                        return RetryDelayParser.Clamp(TimeSpan.FromSeconds(seconds));
                     }
                 }
             }
@@ -130,17 +119,7 @@ public sealed partial class GeminiVisionClassifier
             // Beklenmeyen/bozuk gövde — metin geri düşüşüne bırak.
         }
 
-        var textMatch = RetryDelayTextPattern.Match(responseText);
-        if (textMatch.Success &&
-            double.TryParse(textMatch.Groups[1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var textSeconds))
-        {
-            return Clamp(TimeSpan.FromSeconds(textSeconds));
-        }
-
-        return null;
-
-        static TimeSpan Clamp(TimeSpan delay) =>
-            delay < MinRetryDelay ? MinRetryDelay : delay > MaxRetryDelay ? MaxRetryDelay : delay;
+        return RetryDelayParser.ParseFromText(responseText);
     }
 
     private static bool TryParseDurationSeconds(string? duration, out double seconds)

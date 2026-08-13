@@ -88,8 +88,12 @@ namespace PriceBotPipeline;
 /// RESMİ/TOPLULUK BİR .NET SDK'SI KULLANILMIYOR — ham HTTP POST + System.Text.Json,
 /// Worker.cs'in bot'un kendi API'sine karşı zaten kullandığı desenle aynı (bkz.
 /// TrySendTextAsync/TrySendAsync). Yeni NuGet paketi eklenmedi (dependency-hafifliği
-/// önceliğiyle tutarlı — bkz. CLAUDE.md Tesseract kaldırma notu).</summary>
-public sealed partial class GeminiVisionClassifier
+/// önceliğiyle tutarlı — bkz. CLAUDE.md Tesseract kaldırma notu).
+///
+/// <see cref="IProductCodeClassifier"/> UYGULAR (2026-08-13): Worker.cs'in çoklu-sağlayıcı
+/// zincirinde (bkz. o arayüzün dosya başı yorumu) Gemini birincil/ikincil key olarak İKİ AYRI
+/// örnek (aynı sınıf, farklı apiKey) bu arayüz üzerinden aynı döngüyle çağrılıyor.</summary>
+public sealed partial class GeminiVisionClassifier : IProductCodeClassifier
 {
     private const string ApiBase = "https://generativelanguage.googleapis.com/v1beta/models";
     private const int MaxImages = 4;
@@ -231,46 +235,47 @@ public sealed partial class GeminiVisionClassifier
     ///    onayıyla, dosya başı "YEDEK MODEL ZİNCİRİ" notundaki "geçici hatada yedek denenmez"
     ///    kuralının SADECE bu üçüncü basamak için bilinçli istisnası).
     /// <c>ApiFailed=true</c> döndüğünde çağıran taraf (Worker.cs) o klasördeki KALAN görseller
-    /// için Gemini kod tespitini atlamalı (devre kesici — aynı kota/config duvarına klasördeki her
-    /// görsel için ayrı ayrı çarpmamak için). SADECE kalıcı hatalarda (429 kota, 400/404 config)
-    /// true döner — geçici hatalarda (503/timeout/ağ) üç deneme de başarısız kalırsa false döner:
-    /// bu TEK görsel "bulunamadı" gibi atlanır ama devre açık kalır, sonraki görsel için Gemini
-    /// yine denenir.</summary>
-    public async Task<(string? Code, bool ApiFailed)> ClassifyCodeAsync(
+    /// için Gemini kod tespitini atlamalı (devre kesici). SADECE gerçekten kalıcı hatalarda
+    /// (400/404 config, içerik engeli) true döner. <c>RetryAfter</c> (2026-08-13, kullanıcı
+    /// isteği — bkz. IProductCodeClassifier.cs dokümantasyonu) 429 KOTA aşımında dönen ÜÇÜNCÜ bir
+    /// durum: SENKRON beklemek yerine Worker.cs'e "şimdilik değil, bu görseli erteleyip diğerlerini
+    /// işledikten sonra bir kez daha dene" sinyali gönderir — devre kesici TETİKLENMEZ (kota,
+    /// diğer görseller işlenirken geçecek gerçek süre içinde kendiliğinden açılabilir).
+    ///
+    /// Deneme sırası: (1) birincil model — <see cref="ClassifyLabelAsync"/> zaten 429/400/404'te
+    /// OTOMATİK olarak yedek modele TEK seferlik, SIFIR-bekleme ile geçiyor (bkz. o metodun
+    /// yorumu) — bu adım burada TEKRARLANMIYOR. (2) O ikisi de başarısız olup hata GERÇEKTEN
+    /// geçici ise (5xx/ağ — kota DEĞİL, 2026-08-13'te kota bu adımdan bilinçli olarak ÇIKARILDI,
+    /// çünkü kota onlarca saniye sürebilir ve bloklamaya değmez) KISA (<see cref="CodeRetryDelay"/>)
+    /// bir senkron bekleme + AYNI modele tekrar deneme (503 genelde saniyeler içinde geçen anlık
+    /// bir yoğunluk, bloklamaya değer kadar kısa). (3) O DA geçici hatayla başarısız olursa, son
+    /// çare yedek modele TEK seferlik geçiş (2026-08-11, DECO 57-013 vakası — bkz. dosya başı
+    /// "YEDEK MODEL ZİNCİRİ" notu, bu istisna SADECE gerçek geçici hatalar için, kota için
+    /// DEĞİL).</summary>
+    public async Task<(string? Code, bool ApiFailed, TimeSpan? RetryAfter)> ClassifyCodeAsync(
         string imagePath,
         IReadOnlyCollection<string> candidateCodes,
         CancellationToken ct)
     {
         if (_apiKey.Length == 0 || candidateCodes.Count == 0)
-            return (null, false);
+            return (null, false, null);
 
         var codes = candidateCodes.Distinct(StringComparer.Ordinal).OrderBy(c => c, StringComparer.Ordinal).ToList();
         _logger.LogInformation("Gemini görü tespiti: ürün kodu için soruluyor -> {File}", Path.GetFileName(imagePath));
         var result = await ClassifyLabelAsync([imagePath], codes, CodeUserPrompt, CodeSystemPrompt, ct);
 
-        // 2026-08-13 (gerçek vaka: NGZ/MİNİCE, HTTP 429 "limit: 5" — bkz. dosya başı ve
-        // IsQuotaError dokümantasyonu): 429 artık IsTransientFailure ile AYNI şekilde (bekle +
-        // aynı modele tekrar dene, sonra yedek modele geç) ele alınıyor — eskiden kalıcı sayılıp
-        // hiç tekrar denenmeden doğrudan devre kesiciyi tetikliyordu. Fark SADECE bekleme süresi:
-        // kota aşımında Google'ın önerdiği süre (ParseRetryDelay, yoksa CodeRetryDelay'e düşer),
-        // gerçek geçici hatada (503/timeout) sabit CodeRetryDelay.
-        if (result.Label is null && (result.IsTransientFailure || result.IsQuotaExceeded))
+        if (result.Label is null && result.IsTransientFailure && !result.IsQuotaExceeded)
         {
-            var delay = result.IsQuotaExceeded ? (result.RetryDelay ?? CodeRetryDelay) : CodeRetryDelay;
-            _logger.LogInformation("Gemini görü tespiti: '{File}' için {Reason} alındı, {Delay:N1} sn sonra AYNI modele ({Model}) tekrar denenecek.",
-                Path.GetFileName(imagePath), result.IsQuotaExceeded ? "kota aşımı (429)" : "geçici bir hata", delay.TotalSeconds, _model);
-            await Task.Delay(delay, ct);
-            // modelOverride: _model — ClassifyLabelAsync'in birincil-model-429/400/404'te otomatik
-            // yedeğe geçme mantığını (aşağıda) bilinçli olarak BYPASS eder, bu tekrar denemede
-            // ikinci bir yedek-model çağrısı tetiklenmesin (aksi halde tek bir kota-aşımı olayı
-            // 4 yerine 6 isteğe çıkardı — kota koruma ruhuna aykırı).
+            _logger.LogInformation("Gemini görü tespiti: '{File}' için geçici bir hata alındı, {Delay:N1} sn sonra AYNI modele ({Model}) tekrar denenecek.",
+                Path.GetFileName(imagePath), CodeRetryDelay.TotalSeconds, _model);
+            await Task.Delay(CodeRetryDelay, ct);
             result = await ClassifyLabelAsync([imagePath], codes, CodeUserPrompt, CodeSystemPrompt, ct, modelOverride: _model);
         }
 
-        if (result.Label is null && (result.IsTransientFailure || result.IsQuotaExceeded) && _fallbackModel != _model)
+        if (result.Label is null && result.IsTransientFailure && !result.IsQuotaExceeded && _fallbackModel != _model)
         {
-            _logger.LogInformation("Gemini görü tespiti: '{File}' için ikinci deneme de {Reason} ile başarısız oldu, son çare olarak yedek modele ({Fallback}) geçiliyor.",
-                Path.GetFileName(imagePath), result.IsQuotaExceeded ? "kota aşımı (429)" : "geçici hata", _fallbackModel);
+            _logger.LogInformation("Gemini görü tespiti: '{File}' için ikinci deneme de geçici hatayla başarısız oldu, son çare olarak yedek modele ({Fallback}) geçiliyor.",
+                Path.GetFileName(imagePath), _fallbackModel);
             result = await ClassifyLabelAsync([imagePath], codes, CodeUserPrompt, CodeSystemPrompt, ct, modelOverride: _fallbackModel);
         }
 
@@ -278,25 +283,27 @@ public sealed partial class GeminiVisionClassifier
         {
             if (result.IsQuotaExceeded)
             {
-                // Birincil + yedek model, bekleme dahil TÜM deneme zincirinden sonra hâlâ kota
-                // aşımı — artık gerçekten tükenmiş kabul edilir (tek bir 429'da değil), devre
-                // kesiciyi tetikle (bkz. Worker.cs geminiCodeApiHealthy).
-                _logger.LogWarning("Gemini görü tespiti: '{File}' için tüm denemelerden (birincil+yedek model, bekleme dahil) sonra da kota aşıldı (429), bu klasördeki kalan görseller için Gemini atlanacak.", Path.GetFileName(imagePath));
-                return (null, ApiFailed: true);
+                // Birincil model VE onun otomatik yedek-model denemesi (ClassifyLabelAsync
+                // içinde, sıfır-bekleme) İKİSİ de kota aşımı verdi — burada BEKLEMİYORUZ, Worker.cs
+                // bu görseli erteleyip diğerlerini işledikten sonra bir kez daha deneyecek.
+                var delay = result.RetryDelay ?? CodeRetryDelay;
+                _logger.LogInformation("Gemini görü tespiti: '{File}' için kota aşımı (429) — bu görsel ertelenip diğer görseller işlendikten sonra (~{Delay:N0} sn) tekrar denenecek.",
+                    Path.GetFileName(imagePath), delay.TotalSeconds);
+                return (null, ApiFailed: false, RetryAfter: delay);
             }
             if (result.IsTransientFailure)
             {
                 _logger.LogInformation("Gemini görü tespiti: '{File}' için tüm denemelerden sonra da geçici bir hata alındı, bu görsel atlanacak ama klasördeki sonraki görseller için Gemini yine denenecek.", Path.GetFileName(imagePath));
-                return (null, ApiFailed: false);
+                return (null, ApiFailed: false, null);
             }
-            return (null, ApiFailed: true); // kalıcı hata (config/içerik engeli) — devre kesiciyi tetikle
+            return (null, ApiFailed: true, null); // kalıcı hata (config/içerik engeli) — devre kesiciyi tetikle
         }
         if (result.Label == NotFoundLabel)
         {
             _logger.LogInformation("Gemini görü tespiti: '{File}' için ürün kodu BULUNAMADI yanıtı geldi.", Path.GetFileName(imagePath));
-            return (null, false);
+            return (null, false, null);
         }
-        return (result.Label, false);
+        return (result.Label, false, null);
     }
 
     /// <summary>Bir <see cref="ClassifyLabelAsync"/> çağrısının sonucu. <paramref name="Label"/>
