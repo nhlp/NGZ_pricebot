@@ -247,8 +247,19 @@ public class ExcelPriceReader
                 // 0 basıldı). "fiyat"/"price" her zaman "tutar"dan önceliklidir; sütun sırası
                 // bağımsız — ama öncelik tek başına yeterli değil, aşağıda tamamı boş/sıfır olan
                 // adaylar da elenir (bkz. ColumnHasAnyNonZeroValue).
+                //
+                // SADECE-PARA-BİRİMİ başlığı da (2026-08-19, gerçek vaka: NGZ "2026 MİNİTİX 3 İP
+                // TL FİYAT LİSTESİ" — aynı liste 17/18/19 Ağustos'ta 3 kez başarısız oldu): bazı
+                // listelerde fiyat sütununun başlığı "fiyat"/"tutar" kelimesini hiç içermiyor,
+                // sadece para birimi kısaltması ("TL") yazıyor. Bu durumda YUKARIDAKİ kontrol hiç
+                // eşleşmiyor, satır header sayılmıyor, tablo "başlıksız" sanılıyor — başlıksız
+                // yoldaki değer-şekli sezgisi ("kısa ve boşluksuz mu") ise SIRA NO gibi alakasız
+                // sütunları da kod adayı sayabiliyor (bkz. LooksLikeSequentialRowIndexColumn'daki
+                // vaka anlatımı). "tl"/"try"/"₺"/"$" başlık hücresinin TAMAMI (Contains değil, tam
+                // eşitlik) olduğunda güvenle fiyat sinyali sayılır — Contains kullanılsaydı "atlıyor"
+                // gibi "tl" alt-dizesi geçen alakasız kelimeler yanlışlıkla eşleşebilirdi.
                 int pricePriority = (colName.Contains("fiyat") || colName.Contains("price")) ? 2
-                    : colName.Contains("tutar") ? 1
+                    : (colName.Contains("tutar") || CurrencyOnlyHeaderPattern.IsMatch(colName.Trim())) ? 1
                     : -1;
                 if (pricePriority >= 0) rowPriceCandidates.Add((col, pricePriority));
             }
@@ -266,11 +277,29 @@ public class ExcelPriceReader
                 .Select(p => (int?)p.Col)
                 .FirstOrDefault() ?? -1;
 
-            if (rowCandidates.Count > 0 && hPrice != -1)
+            // GÜVENLİK AĞI (2026-08-19, gerçek vaka: NGZ "2026-KADİFE.xlsx" / BABYİM,
+            // Gonderim_20260817_161752_6b1484cc): kod adayı ile fiyat adayı AYNI sütunda
+            // olamaz — aksi halde her ürünün "fiyatı" kendi kodu olur. Bu dosyada, asıl başlık
+            // satırından (B=Ürün Numarası, E=GÜNCEL FİYAT) ÖNCE gelen birleşik bir banner
+            // hücresi (" Kadife Ürün Fiyat Listesi", tek dolu hücre) hem "ürün" (kod adayı,
+            // öncelik 1) hem "fiyat" (fiyat adayı, öncelik 2) kelimesini İÇERİYORDU — üstteki
+            // döngü bu satırı (henüz asıl başlığa ulaşmadan) geçerli bir başlık sanıp
+            // priceCol = codeCol = B seçti; sonuç: 14 görselin TAMAMINA gerçek TL fiyatı
+            // yerine ürünün kendi kodu basıldı (ör. kod 2456, gerçek fiyat 296 TL iken "fiyat"
+            // 2456 sanıldı — $60,23 basıldı, olması gereken ~$7,26), bu yanlış fiyatlı
+            // görseller gerçek müşteriye WhatsApp'tan gönderildi. Başlıksız-tablo dalında
+            // (aşağıda, "usedCols.Where(c => c != priceCol...)") zaten var olan aynı ayrım
+            // burada da uygulanıyor: hPrice'a denk gelen sütun kod adaylarından çıkarılır;
+            // geriye kod adayı kalmazsa (bu banner vakasında olduğu gibi, tek dolu hücre hem
+            // kod hem fiyat kelimesini taşıyordu) bu satır header sayılmaz, tarama bir sonraki
+            // satıra (gerçek başlığa) devam eder.
+            var codeCandidatesExcludingPriceCol = rowCandidates.Where(c => c.Col != hPrice).ToList();
+
+            if (codeCandidatesExcludingPriceCol.Count > 0 && hPrice != -1)
             {
                 headerRow = row;
                 priceCol = hPrice;
-                codeColumnHeaders = rowCandidates;
+                codeColumnHeaders = codeCandidatesExcludingPriceCol;
                 break;
             }
         }
@@ -358,6 +387,12 @@ public class ExcelPriceReader
             foreach (var (col, name, priority) in codeColumnHeaders)
             {
                 if (applySizeOrAgeFilter && LooksLikeSizeOrAgeColumn(rows, headerRow.RowNumber, col, priority)) continue;
+                // Bilinçli olarak applySizeOrAgeFilter'a bağlı DEĞİL (yukarıdaki gibi koşullu
+                // değil): gerçek bir SIRA NO sütunu her iki geçişte de (normal + kurtarma) aynı
+                // şekilde kesin bir dizi olacağı için bu kontrolün iki geçişte de aktif kalması
+                // güvenlidir — kurtarma geçişinin amacı yanlışlıkla elenen TİRELİ kod sütunlarını
+                // geri getirmek, SIRA NO'yu değil.
+                if (LooksLikeSequentialRowIndexColumn(rows, headerRow.RowNumber, col, priority)) continue;
 
                 var prices = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
                 var descriptions = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -402,6 +437,7 @@ public class ExcelPriceReader
                 }
 
                 AddSpacedSuffixAliases(prices, descriptions);
+                AddHyphenStrippedAliases(prices, descriptions);
 
                 if (prices.Count > 0)
                     candidates.Add(new CodeColumnCandidate(name, col, priority, prices, skippedRows, descriptions));
@@ -471,6 +507,13 @@ public class ExcelPriceReader
     /// boşluklu serbest metin sütunlar (açıklama) burada elenir. Kesin bir karar DEĞİLDİR —
     /// Worker.cs'teki OCR oylaması asıl hakemdir (bkz. LoadCandidateCodeColumns çağıranı); bu
     /// sadece bariz metin sütunlarını adaylıktan düşürüp oylamaya gereksiz gürültü taşımayı önler.</summary>
+    /// <summary>Başlık hücresinin TAMAMININ (trim sonrası) sadece bir para birimi kısaltması
+    /// olduğunu tespit eder — "fiyat"/"price"/"tutar" içermeyen ama yine de fiyat sütunu olan
+    /// başlıklar için (bkz. yukarıdaki "SADECE-PARA-BİRİMİ başlığı" notu). Bilinçli olarak
+    /// TAM EŞİTLİK (^...$) kullanılır, Contains değil — "tl" bir alt-dize kontrolüyle arandığında
+    /// "atlıyor", "satıldı" gibi tamamen alakasız kelimeler yanlışlıkla eşleşirdi.</summary>
+    private static readonly Regex CurrencyOnlyHeaderPattern = new(@"^(tl|try|usd|₺|\$)$", RegexOptions.Compiled);
+
     private static bool LooksLikeCodeColumn(List<GridRow> rows, int headerRowNumber, int col, int sampleSize = 15)
     {
         int total = 0, plausible = 0;
@@ -524,6 +567,50 @@ public class ExcelPriceReader
         if (multiNumber * 2 < rangeLike && headerPriority >= 2) return false;
 
         return true;
+    }
+
+    /// <summary>Bir sütunun değerleri satır sırasına göre KESİNTİSİZ +1 artan bir tamsayı
+    /// dizisiyse (1,2,3,4,... ya da 0,1,2,3,...) bu KESİNLİKLE bir ürün kodu DEĞİL, bir SIRA
+    /// NUMARASI sütunudur — gerçek vaka (2026-08-19, NGZ "2026 MİNİTİX 3 İP TL FİYAT LİSTESİ",
+    /// aynı müşteri aynı listeyi 17/18/19 Ağustos'ta 3 kez gönderdi, üçünde de aynı hata):
+    /// bu listenin fiyat başlığı sadece "TL" idi (eski kod bunu tanımıyordu — bkz. yukarıdaki
+    /// "SADECE-PARA-BİRİMİ başlığı" notu), başlık satırı hiç bulunamadı, tablo "başlıksız"
+    /// sayıldı. Başlıksız yoldaki LooksLikeCodeColumn SADECE "kısa ve boşluksuz mu" bakıyor —
+    /// "SIRA NO" sütununu (değerleri 1..32) da bir kod adayı sandı. Sonuç: bu sütunun değerleri
+    /// gerçek MODELKODU sütunuyla BİRLEŞTİRİLİP excelCodesUnion'a (Worker.cs) girdi; OCR'ın
+    /// yanlışlıkla okuduğu küçük bir sayı ("11", "21" gibi) SIRA NO'nun o satırındaki GERÇEK bir
+    /// fiyatla eşleşip müşteriye BAŞKA bir ürünün fiyatı %32-100 "güven" ile damgalanıp
+    /// gönderildi (kod "11" → SIRA NO=11'in satırındaki 326,50 TL; kod "21" → SIRA NO=21'in
+    /// 322,00 TL'si — üç ayrı gönderimde toplam 4 kez tekrarlandı, biri Claude görü tespitiyle
+    /// bile "%100 güven"le). Şekil çok KESİN olduğu için (gerçek bir ürün kodu ailesinin
+    /// TESADÜFEN satır sırasına birebir uyan kesintisiz bir dizi oluşturması neredeyse imkânsız)
+    /// bu güvenlik ağı ucuzdur. LooksLikeSizeOrAgeColumn ile AYNI kalıp izlenir: açık "kod"/
+    /// "sku"/"id" başlığı (<paramref name="headerPriority"/> == 2) varsa sütun elenmez (bazı
+    /// listeler gerçekten ürünlerini 1,2,3... diye kodlamış olabilir, açık başlık kazanır);
+    /// başlıksız yolun ürettiği adaylar HER ZAMAN priority=0 olduğu için oradaki SIRA NO gibi
+    /// sütunlar bu kontrolden hiçbir zaman muaf tutulmaz.</summary>
+    private static bool LooksLikeSequentialRowIndexColumn(List<GridRow> rows, int headerRowNumber, int col, int headerPriority, int sampleSize = 15)
+    {
+        if (headerPriority >= 2) return false;
+
+        int? prev = null;
+        int? first = null;
+        int count = 0;
+        foreach (var row in rows.Where(r => r.RowNumber > headerRowNumber))
+        {
+            var val = row.Cell(col).Trim();
+            if (string.IsNullOrEmpty(val)) continue;
+
+            if (!int.TryParse(val, NumberStyles.Integer, CultureInfo.InvariantCulture, out int n)) return false;
+            first ??= n;
+            if (prev.HasValue && n != prev.Value + 1) return false;
+            prev = n;
+
+            count++;
+            if (count >= sampleSize) break;
+        }
+
+        return count >= 3 && first is 0 or 1;
     }
 
     /// <summary>Marka-önekli/sonekli kod desteği (2026-08-13, gerçek vaka: NGZ "NET MEVSİMLİK
@@ -589,6 +676,58 @@ public class ExcelPriceReader
 
     private static bool IsPlausibleNumericAlias(string token) =>
         token.Length is >= 3 and <= 7 && token.All(char.IsDigit);
+
+    /// <summary>Tireli stil-numarası kod desteği (2026-08-19, gerçek vaka: NGZ "2026 MİNİTİX 3
+    /// İP TL FİYAT LİSTESİ" — Gonderim_20260817_182716_1ebcfab2 ve aynı listenin 18/19
+    /// Ağustos'taki iki tekrar gönderimi): bazı Excel listelerinde kod hücresi tek-tireli stil
+    /// numarası formatında ("26-274", "26-206" gibi), ama fiziksel etikette OCR bunu TİRESİZ,
+    /// tek bir bitişik sayı olarak okuyor ("26274") — <see cref="MatchExact"/> (tam string
+    /// eşitliği) hiçbir zaman eşleşmiyor. Gerçek vakada 16 görselin 12-13'ü bu yüzden "eşleşen
+    /// kod bulunamadı" ile atlandı; OCR'ın okuduğu adaylar ("26274", "26269", "26230"...) tire
+    /// kaldırılınca Excel'deki MODELKODU sütunuyla BİREBİR örtüşüyordu.
+    ///
+    /// AddSpacedSuffixAliases'tan FARKI: o fonksiyon boşlukla ayrılan iki AYRI token'dan birini
+    /// (ör. "MİNİCE 6482" -> "6482") alias yapıyor; burada OCR kodu TEK bir bitişik sayı olarak
+    /// okuduğu için tireyi SİLİP iki tarafı BİRLEŞTİRMEK gerekiyor ("26-274" -> "26274"). Harf
+    /// içeren tireli sonekler ("V-029" gibi) güvenlidir — birleşik hâl harf içerdiği için
+    /// IsPlausibleNumericAlias'ın "tüm rakam" testinden geçemez, alias hiç üretilmez, sadece
+    /// tam-string eşleşmesi geçerli kalır. Mevcut hiçbir anahtar silinmez/üzerine yazılmaz,
+    /// sadece yeni eşleşme imkânı eklenir; çakışma güvenlik ağı AddSpacedSuffixAliases ile
+    /// birebir aynıdır (RegisterAlias'ın kopyası — iki farklı kod aynı birleşik alias'a inerse
+    /// ya da alias zaten ayrı bir gerçek kodsa hiç eklenmez).</summary>
+    private static void AddHyphenStrippedAliases(Dictionary<string, decimal> prices, Dictionary<string, string> descriptions)
+    {
+        var aliasSourceCode = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var conflicts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        void RegisterAlias(string alias, string sourceCode)
+        {
+            if (prices.ContainsKey(alias)) { conflicts.Add(alias); return; }
+            if (aliasSourceCode.TryGetValue(alias, out var existingCode))
+            {
+                if (prices[existingCode] != prices[sourceCode]) conflicts.Add(alias);
+                return;
+            }
+            aliasSourceCode[alias] = sourceCode;
+        }
+
+        foreach (var code in prices.Keys.ToList())
+        {
+            if (!code.Contains('-')) continue;
+
+            var stripped = code.Replace("-", "");
+            if (stripped == code || !IsPlausibleNumericAlias(stripped)) continue;
+
+            RegisterAlias(stripped, code);
+        }
+
+        foreach (var (alias, sourceCode) in aliasSourceCode)
+        {
+            if (conflicts.Contains(alias)) continue;
+            prices[alias] = prices[sourceCode];
+            if (descriptions.TryGetValue(sourceCode, out var desc)) descriptions[alias] = desc;
+        }
+    }
 
     /// <summary>Bir fiyat sütunu adayının veri satırlarında en az bir sıfırdan farklı, geçerli
     /// fiyat olup olmadığını kontrol eder. "Tutarı" gibi formül sütunları (fiyat × miktar) miktar

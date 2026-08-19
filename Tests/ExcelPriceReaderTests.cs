@@ -462,9 +462,13 @@ public class ExcelPriceReaderTests
             // elenip geriye SADECE ÜRÜN ADI kalması) artık olmadığını doğrulamak.
             var kodColumn = Assert.Single(candidates, c => c.HeaderName == "KOD");
             Assert.Equal(2, kodColumn.HeaderPriority);
-            Assert.Equal(3, kodColumn.Prices.Count);
+            // 3 tam kod + AddHyphenStrippedAliases'ın eklediği 3 tiresiz alias ("26158" vb., bkz.
+            // 2026-08-19 MİNİTİX vakası) = 6.
+            Assert.Equal(6, kodColumn.Prices.Count);
             Assert.True(kodColumn.Prices.ContainsKey("26-158"));
             Assert.Equal(179.95m, kodColumn.Prices["26-158"]);
+            Assert.True(kodColumn.Prices.ContainsKey("26158"));
+            Assert.Equal(179.95m, kodColumn.Prices["26158"]);
 
             // Nihai (tek-sütunlu) seçici de KOD'u (öncelik 2), ÜRÜN ADI'nı (öncelik 1) DEĞİL
             // seçmeli — LoadPricesFromExcel gerçek Worker akışının (tek-aday geriye dönük uyumluluk
@@ -551,6 +555,61 @@ public class ExcelPriceReaderTests
             foreach (var (code, _, price) in rows)
             {
                 Assert.True(kod.Prices.ContainsKey(code), $"Kod {code} bulunamadı — sütun sessizce elendi.");
+                Assert.Equal(price, kod.Prices[code]);
+            }
+        }
+        finally { File.Delete(path); }
+    }
+
+    /// <summary>GERÇEK VAKA (NGZ "2026-KADİFE.xlsx" / BABYİM, Gonderim_20260817_161752_6b1484cc,
+    /// 2026-08-17): asıl başlık satırından (B="Ürün Numarası", E="GÜNCEL FİYAT" — kod ve fiyat
+    /// AYRI sütunlarda) ÖNCE, tek dolu hücreli bir birleşik banner satırı var: " Kadife Ürün
+    /// Fiyat Listesi". Bu tek hücre metni hem "ürün" (kod adayı, öncelik 1) hem "fiyat" (fiyat
+    /// adayı, öncelik 2) içerdiği için header-arama döngüsü asıl başlığa hiç ulaşmadan bu
+    /// banner satırını header sanıyor, kod VE fiyat sütununu AYNI sütuna (banner'ın kendi
+    /// sütunu) atıyordu. Sonuç: her ürünün "fiyatı" kendi kodu oluyordu (ör. kod 2456, gerçek
+    /// fiyat 296 TL iken "fiyat" 2456 okundu) — bu yanlış (gerçek değerinin ~8 katı) fiyatlı 14
+    /// görsel gerçek müşteriye WhatsApp'tan gönderildi. Düzeltme: header adaylığı
+    /// değerlendirilirken fiyat sütununa denk gelen kod adayı elenir (başlıksız-tablo yolundaki
+    /// "c != priceCol" güvenlik ağıyla aynı ruh) — geriye kod adayı kalmazsa satır header
+    /// sayılmaz, tarama asıl başlığa kadar devam eder.</summary>
+    [Fact]
+    public void LoadCandidateCodeColumns_BannerSatiriHemKodHemFiyatKelimesiIceriyor_AsilBasligaGecilir()
+    {
+        using var wb = new XLWorkbook();
+        var ws = wb.Worksheets.Add("Sheet1");
+        // Banner satırı: tek dolu hücre, hem "Ürün" hem "Fiyat" kelimesini içeriyor — kod VE
+        // fiyat adayı AYNI sütunda (A) çakışıyor.
+        ws.Cell(1, 1).Value = " Kadife Ürün Fiyat Listesi";
+
+        // Asıl başlık satırı: kod ve fiyat AYRI sütunlarda.
+        ws.Cell(3, 1).Value = "Ürün Numarası";
+        ws.Cell(3, 2).Value = "Fiyat";
+
+        var rows = new (string Code, decimal Price)[]
+        {
+            ("2426", 295m),
+            ("2456", 296m),
+            ("2455", 298m),
+        };
+        for (int i = 0; i < rows.Length; i++)
+        {
+            ws.Cell(i + 4, 1).Value = rows[i].Code;
+            ws.Cell(i + 4, 2).Value = rows[i].Price;
+        }
+
+        var path = Path.Combine(Path.GetTempPath(), $"pricebot_test_{Guid.NewGuid():N}.xlsx");
+        wb.SaveAs(path);
+        try
+        {
+            var candidates = ExcelPriceReader.LoadCandidateCodeColumns(path);
+
+            var kod = Assert.Single(candidates);
+            foreach (var (code, price) in rows)
+            {
+                Assert.True(kod.Prices.ContainsKey(code), $"Kod {code} bulunamadı.");
+                // Asıl regresyon kontrolü: fiyat, ürünün KENDİ KODU değil, "Fiyat" sütunundaki
+                // gerçek değer olmalı.
                 Assert.Equal(price, kod.Prices[code]);
             }
         }
@@ -983,6 +1042,181 @@ public class ExcelPriceReaderXlsFallbackTests
             var candidates = ExcelPriceReader.LoadCandidateCodeColumns(path);
             var stokIsmi = candidates.Single(c => c.HeaderName == "Stok ismi");
             Assert.DoesNotContain(stokIsmi.Prices.Keys, k => k.All(char.IsDigit));
+        }
+        finally { File.Delete(path); }
+    }
+
+    /// <summary>GERÇEK VAKA (2026-08-19, NGZ "2026 MİNİTİX 3 İP TL FİYAT LİSTESİ" —
+    /// Gonderim_20260817_182716_1ebcfab2 ve aynı listenin 18/19 Ağustos'taki iki tekrar
+    /// gönderimi): kod hücresi tek-tireli stil numarası formatındaydı ("26-274" gibi) ama
+    /// fiziksel etikette OCR bunu tiresiz, tek bir bitişik sayı olarak okuyordu ("26274") —
+    /// tam-string eşitliği hiç sağlanamadığı için 16 görselin 12-13'ü "eşleşen kod bulunamadı"
+    /// ile atlanmıştı. Bu test, AddHyphenStrippedAliases'ın tam kodun YANINDA tiresiz bitişik
+    /// hâlini de aynı fiyata bağladığını doğrular.</summary>
+    [Fact]
+    public void LoadPricesFromExcel_TireliStilKodu_TiresizAliasOlarakDaEslesir()
+    {
+        using var wb = new XLWorkbook();
+        var ws = wb.Worksheets.Add("Fiyat Listesi");
+        ws.Cell(1, 1).Value = "Kod";
+        ws.Cell(1, 2).Value = "Fiyat";
+        ws.Cell(2, 1).Value = "26-274";
+        ws.Cell(2, 2).Value = 479.20m;
+
+        var path = Path.Combine(Path.GetTempPath(), $"pricebot_test_{Guid.NewGuid():N}.xlsx");
+        wb.SaveAs(path);
+        try
+        {
+            var prices = ExcelPriceReader.LoadPricesFromExcel(path);
+            Assert.Equal(479.20m, prices["26-274"]);
+            Assert.True(prices.ContainsKey("26274"), "OCR'ın tiresiz okuduğu bitişik sayı ('26274') alias olarak eklenmemiş.");
+            Assert.Equal(479.20m, prices["26274"]);
+        }
+        finally { File.Delete(path); }
+    }
+
+    /// <summary>Güvenlik ağı: iki farklı tireli kod aynı tiresiz bitişik sayıya inerse
+    /// ("26-274" ve "262-74" ikisi de "26274" olur) alias eklenmemeli — belirsizlikte
+    /// tam-string eşleşmesi tek geçerli yol olarak kalmalı.</summary>
+    [Fact]
+    public void LoadPricesFromExcel_TireliKodCakisanAlias_AliasEklenmezSessizceYanlisFiyatVerilmez()
+    {
+        using var wb = new XLWorkbook();
+        var ws = wb.Worksheets.Add("Fiyat Listesi");
+        ws.Cell(1, 1).Value = "Kod";
+        ws.Cell(1, 2).Value = "Fiyat";
+        ws.Cell(2, 1).Value = "26-274";
+        ws.Cell(2, 2).Value = 479.20m;
+        ws.Cell(3, 1).Value = "262-74";
+        ws.Cell(3, 2).Value = 199.00m;
+
+        var path = Path.Combine(Path.GetTempPath(), $"pricebot_test_{Guid.NewGuid():N}.xlsx");
+        wb.SaveAs(path);
+        try
+        {
+            var prices = ExcelPriceReader.LoadPricesFromExcel(path);
+            Assert.Equal(479.20m, prices["26-274"]);
+            Assert.Equal(199.00m, prices["262-74"]);
+            Assert.False(prices.ContainsKey("26274"), "İki farklı tireli koddan çakışan bir alias sessizce eklenmiş.");
+        }
+        finally { File.Delete(path); }
+    }
+
+    /// <summary>Tireli sonek harf içeriyorsa ("V-029" gibi) tiresiz hâli de harf içerir ve
+    /// IsPlausibleNumericAlias'ın "tüm rakam" testinden geçemez — hiç alias eklenmemeli, sadece
+    /// tam-string eşleşmesi geçerli kalmalı.</summary>
+    [Fact]
+    public void LoadPricesFromExcel_TireliSonektaHarfVarsaAliasEklenmez()
+    {
+        using var wb = new XLWorkbook();
+        var ws = wb.Worksheets.Add("Fiyat Listesi");
+        ws.Cell(1, 1).Value = "Kod";
+        ws.Cell(1, 2).Value = "Fiyat";
+        ws.Cell(2, 1).Value = "V-029";
+        ws.Cell(2, 2).Value = 100.00m;
+
+        var path = Path.Combine(Path.GetTempPath(), $"pricebot_test_{Guid.NewGuid():N}.xlsx");
+        wb.SaveAs(path);
+        try
+        {
+            var prices = ExcelPriceReader.LoadPricesFromExcel(path);
+            Assert.Single(prices);
+            Assert.True(prices.ContainsKey("V-029"));
+        }
+        finally { File.Delete(path); }
+    }
+
+    /// <summary>GERÇEK VAKA (2026-08-19, aynı NGZ MİNİTİX vakası): fiyat sütununun başlığı
+    /// sadece "TL" idi — eski kod sadece "fiyat"/"tutar"/"price" tanıyordu, bu yüzden başlık
+    /// satırı hiç bulunamıyor, tablo yanlışlıkla "başlıksız" sayılıyordu. Bu test, "TL"
+    /// başlığının artık tanındığını ve kod sütununun doğru başlığıyla ("MODELKODU", "[N].
+    /// sütun (başlıksız)" DEĞİL) bulunduğunu doğrular.</summary>
+    [Fact]
+    public void LoadCandidateCodeColumns_SadeceTLBasligi_FiyatSutunuTanınırBaslikliBulunur()
+    {
+        using var wb = new XLWorkbook();
+        var ws = wb.Worksheets.Add("Fiyat Listesi");
+        ws.Cell(1, 1).Value = "SIRA NO";
+        ws.Cell(1, 2).Value = "MODELKODU";
+        ws.Cell(1, 3).Value = "3 İP TAKIMLAR";
+        ws.Cell(1, 4).Value = "TL";
+
+        var rows = new (int Sira, string Kod, string Aciklama, decimal Fiyat)[]
+        {
+            (1, "26-206", "DESENLİ 3 İP ERKEK", 317.00m),
+            (2, "26-234", "POLO 3 İP ERKEK", 326.50m),
+            (3, "26-270", "GAP 3 İP ERKEK", 359.00m),
+        };
+        foreach (var r in rows)
+        {
+            ws.Cell(r.Sira + 1, 1).Value = r.Sira;
+            ws.Cell(r.Sira + 1, 2).Value = r.Kod;
+            ws.Cell(r.Sira + 1, 3).Value = r.Aciklama;
+            ws.Cell(r.Sira + 1, 4).Value = r.Fiyat;
+        }
+
+        var path = Path.Combine(Path.GetTempPath(), $"pricebot_test_{Guid.NewGuid():N}.xlsx");
+        wb.SaveAs(path);
+        try
+        {
+            var candidates = ExcelPriceReader.LoadCandidateCodeColumns(path);
+
+            var codeCandidate = Assert.Single(candidates);
+            Assert.Equal("MODELKODU", codeCandidate.HeaderName);
+            Assert.Equal(326.50m, codeCandidate.Prices["26-234"]);
+
+            // SIRA NO hiçbir adayda kod olarak görünmemeli.
+            foreach (var candidate in candidates)
+                for (int i = 1; i <= rows.Length; i++)
+                    Assert.False(candidate.Prices.ContainsKey(i.ToString(CultureInfo.InvariantCulture)),
+                        $"SIRA NO değeri '{i}' yanlışlıkla bir ürün kodu gibi fiyat sözlüğüne girmiş.");
+        }
+        finally { File.Delete(path); }
+    }
+
+    /// <summary>GERÇEK VAKA (2026-08-19, aynı NGZ MİNİTİX vakası — bu kez GERÇEKTEN başlıksız
+    /// bir tabloda): başlıksız yoldaki LooksLikeCodeColumn sadece "kısa ve boşluksuz mu"
+    /// bakıyordu, bu yüzden bir "SIRA NO" sütununu (değerleri 1,2,3,...) da kod adayı sanıp
+    /// gerçek kod sütunuyla BİRLEŞTİRİYORDU (Worker.cs'teki excelCodesUnion). Sonuç: OCR'ın
+    /// yanlışlıkla okuduğu küçük bir sayı ("11" gibi) SIRA NO'nun o satırındaki GERÇEK bir
+    /// fiyatla eşleşip müşteriye BAŞKA bir ürünün fiyatı damgalanıp gönderiliyordu. Bu test,
+    /// LooksLikeSequentialRowIndexColumn'ın kesintisiz +1 artan bir tamsayı sütununu (SIRA NO)
+    /// aday listesinden elediğini, gerçek (tireli) kod sütununun etkilenmediğini doğrular.</summary>
+    [Fact]
+    public void LoadCandidateCodeColumns_BasliksizTabloSiraNoSutunu_KodAdayindanElenir()
+    {
+        using var wb = new XLWorkbook();
+        var ws = wb.Worksheets.Add("Fiyat Listesi");
+        // Kasıtlı olarak HİÇBİR başlık satırı yok — veri doğrudan 1. satırdan başlıyor.
+        var rows = new (int Sira, string Kod, decimal Fiyat)[]
+        {
+            (1, "26-206", 317.50m),
+            (2, "26-234", 326.55m),
+            (3, "26-270", 359.35m),
+            (4, "26-240", 308.20m),
+            (5, "26-239", 322.15m),
+        };
+        for (int i = 0; i < rows.Length; i++)
+        {
+            ws.Cell(i + 1, 1).Value = rows[i].Sira;
+            ws.Cell(i + 1, 2).Value = rows[i].Kod;
+            ws.Cell(i + 1, 3).Value = rows[i].Fiyat;
+        }
+
+        var path = Path.Combine(Path.GetTempPath(), $"pricebot_test_{Guid.NewGuid():N}.xlsx");
+        wb.SaveAs(path);
+        try
+        {
+            var candidates = ExcelPriceReader.LoadCandidateCodeColumns(path);
+
+            Assert.NotEmpty(candidates);
+            foreach (var candidate in candidates)
+                for (int i = 1; i <= rows.Length; i++)
+                    Assert.False(candidate.Prices.ContainsKey(i.ToString(CultureInfo.InvariantCulture)),
+                        $"Sıra numarası '{i}' yanlışlıkla kod adayı sütununda bir fiyata bağlanmış.");
+
+            Assert.Contains(candidates, c => c.Prices.ContainsKey("26-206"));
+            Assert.Contains(candidates, c => c.Prices.ContainsKey("26206")); // tire kaldırılmış alias
         }
         finally { File.Delete(path); }
     }

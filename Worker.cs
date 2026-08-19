@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
@@ -28,6 +29,11 @@ public class Worker : BackgroundService
     /// ResolveFolderBrandAsync bu özel metni tanıyıp tekrar soruyu listesiz/doğrudan serbest-metin
     /// olarak sorar (kullanıcı zaten listeyi reddetmiş, tekrar liste sunmak gereksiz).</summary>
     private const string OtherBrandOptionText = "Diğer (markayı kendim yazacağım)";
+
+    /// <summary>Gonderim klasör adının başındaki zaman damgasını yakalar (bkz. "Klasör/dosya
+    /// adlandırma sözleşmesi" — Gonderim_yyyyMMdd_HHmmss_guid; çoklu marka bölmesinde _grupN son
+    /// eki eklenir ama bu damga korunur). Bkz. GetFolderCreatedAt.</summary>
+    private static readonly Regex FolderTimestampRegex = new(@"^Gonderim_(\d{8})_(\d{6})", RegexOptions.Compiled);
 
     private readonly ILogger<Worker> _logger;
 
@@ -530,6 +536,30 @@ public class Worker : BackgroundService
                     var codeClassifierHealthy = new bool[codeClassifiers.Count];
                     Array.Fill(codeClassifierHealthy, true);
 
+                    // GÜVENLİK AĞI (2026-08-19, gerçek vaka: Gonderim_20260819_121909_286105ab,
+                    // dosyalar "MODEL_19942_...jpg", "MODEL_19944_...jpg", "MODEL_19945_...jpg"):
+                    // bot bazen kullanıcının yazdığı model numarasını dosya adına gömüyor. Bu üç
+                    // görselde OCR kodu okuyamayınca AI görü fallback'i devreye girdi; ama
+                    // 19942/19944/19945 Excel'de VAR, sadece fiyat hücresi boş olduğu için
+                    // excelCodes'a (AI'ye verilen KAPALI liste) hiç girmemişti — AI bu yüzden
+                    // gerçek kodu ASLA döndüremezdi, en yakın komşu bir kodu (13994/13995) "%100
+                    // güven"le "buluyordu" ve YANLIŞ fiyat müşteriye gönderiliyordu (aynı yanlış
+                    // kod 13994, dosya adına göre FARKLI iki ürüne — 19944 VE 19945'e — düşmesi bu
+                    // hallüsinasyonun somut kanıtıydı). OCR'ın kendi "DİKKAT: Excel'de VAR ama
+                    // fiyat hücresi boş" güvenlik ağı (Aşama 3.3, aşağıda) SADECE scan.Candidates'e
+                    // (görselden OCR'ın okuduğu adaylar) bakıyordu, dosya adına hiç bakmıyordu ve
+                    // AI'ye hiç uygulanmıyordu. Çözüm: dosya adında geçen bir sayı, Excel'de VAR
+                    // ama fiyatsız (skippedExcelRows) bir koda denk geliyorsa, bu görsel için
+                    // hiçbir AI sağlayıcısı ÇAĞRILMAZ — güçlü ters kanıt varken kapalı-liste
+                    // zorlamasının üreteceği "güvenli görünen ama yanlış" bir tahmine güvenmektense
+                    // açıkça atlanıp Aşama 3.3'te aynı DİKKAT notuyla raporlanır.
+                    List<string> FilenamePricelessCodes(string file) =>
+                        Regex.Matches(Path.GetFileNameWithoutExtension(file), @"\d{3,7}")
+                            .Select(m => m.Value)
+                            .Where(c => skippedExcelRows.Any(s => string.Equals(s.Code, c, StringComparison.OrdinalIgnoreCase)))
+                            .Distinct(StringComparer.OrdinalIgnoreCase)
+                            .ToList();
+
                     // Aşama 3.1: kod çözümleme (2026-08-13, kullanıcı isteği: kota/rate-limit'te
                     // SENKRON beklemek yerine "diğer görselleri işlerken geçecek doğal süreyi
                     // kullan, sonra bir kez daha dene" — gerçek vaka: Groq'un TPM (dakikada token)
@@ -547,6 +577,11 @@ public class Worker : BackgroundService
                         var (file, scan) = scans[idx];
                         var fileName = Path.GetFileName(file);
                         bool anyRetryAfter = false;
+
+                        // Yukarıdaki güvenlik ağı: dosya adında Excel'de VAR ama fiyatsız bir kod
+                        // görülüyorsa AI'ye hiç sorulmadan geç — Aşama 3.3, scan.Candidates'e ek
+                        // olarak bunu da DİKKAT notunda değerlendirecek.
+                        if (FilenamePricelessCodes(file).Count > 0) continue;
 
                         // Son çare (2026-08-10, çoklu-sağlayıcıya genişletildi 2026-08-13): OCR
                         // bu görselde Excel kodlarından hiçbiriyle eşleşen bir aday bulamadı.
@@ -634,8 +669,12 @@ public class Worker : BackgroundService
                             // Okunan aday, Excel'de VAR ama fiyatı boş olduğu için yüklenmemiş bir koda
                             // denk geliyorsa bunu açıkça söyle — "OCR okuyamadı" ile "Excel'de fiyat eksik"
                             // teşhisleri operatör için tamamen farklı aksiyonlardır (gerçek vaka: 1311).
+                            // Dosya adındaki kanıt de (bkz. yukarıdaki FilenamePricelessCodes) aynı
+                            // DİKKAT notuna dahil edilir — MODEL_19942/19944/19945 vakasında OCR
+                            // görselden HİÇ aday okuyamamıştı, tek kanıt dosya adındaydı.
                             var priceless = scan.Candidates
                                 .Where(c => skippedExcelRows.Any(s => string.Equals(s.Code, c, StringComparison.OrdinalIgnoreCase)))
+                                .Union(FilenamePricelessCodes(file), StringComparer.OrdinalIgnoreCase)
                                 .ToList();
                             if (priceless.Count > 0)
                                 reason += $". DİKKAT: kod(lar) {string.Join(", ", priceless)} Excel'de VAR ama fiyat hücresi boş/geçersiz olduğu için yüklenmemişti — Excel'de fiyat doldurulursa bu görsel işlenebilir";
@@ -709,6 +748,72 @@ public class Worker : BackgroundService
                             if (!result.Success) stillPending.Add(new PendingSend(file, recipient));
                             await Task.Delay(400, stoppingToken);
                         }
+                    }
+
+                    // GÜVENLİK AĞI (2026-08-19, gerçek vaka: Gonderim_20260818_133622_804e335e):
+                    // excelFiles/allFiles yukarıda (satır ~342/~401) döngü BAŞINDA bir kez
+                    // okunuyor — bu klasörün OCR/damgalama/gönderim işi dakikalar sürebildiği
+                    // için, müşteri bu ARALIKTA klasöre YENİ bir gerçek Excel + yeni görseller
+                    // bırakabiliyor, worker bunu hiç fark etmiyordu. Gerçek vakada aynı ada sahip
+                    // İKİNCİ bir "ALİSA PİYASA 3 İP .xlsx" + 56 görsel, birinci Excel işlenirken
+                    // (13:38-13:41 arası) klasöre düştü; worker tek-Excel akışıyla (sadece ilk
+                    // Excel'i) işleyip islendi.txt yazdı — bu dosyanın varlığı klasörü KALICI
+                    // olarak taramadan çıkardığı için (yukarıda "!File.Exists(islendi.txt)" şartı)
+                    // ikinci Excel + 56 görsel hiçbir rapora girmeden, hiç işlenmeden, hiç
+                    // gönderilmeden SONSUZA DEK kayboldu — hiçbir yerde hata da loglanmadı.
+                    //
+                    // Düzeltme: gönderim tamamlandıktan ama islendi.txt yazılmadan HEMEN ÖNCE,
+                    // klasör bir kez daha (en güncel hâliyle) taranır. Başlangıçta görülenden
+                    // FAZLA gerçek Excel varsa, YENİ Excel(ler) + bu turda hiç ele alınmamış
+                    // (allFiles snapshot'ında olmayan) görseller, standart
+                    // "Gonderim_yyyyMMdd_HHmmss_guid" adlandırmasıyla TAZE bir kardeş klasöre
+                    // taşınır — bu klasörün islendi.txt'si olmadığı için bir sonraki taramada
+                    // sıfırdan (gerekirse yine SplitMultiBrandFolder ile) bağımsız işlenir. Bu
+                    // turda zaten damgalanıp GÖNDERİLMİŞ görseller asla taşınmaz/tekrar işlenmez
+                    // — sadece henüz hiç ele alınmamış olanlar kurtarılır. Taşıma bir OS hatasıyla
+                    // (ör. dosya o an kilitli) başarısız olursa bu turda kurtarılamaz (kalan artık
+                    // risk, kabul edildi) — ama en azından loglanır, mevcut davranışta olduğu gibi
+                    // sessizce kaybolmaz.
+                    try
+                    {
+                        var lateExcelFiles = RealXlsxFiles(folder)
+                            .Where(f => !excelFiles.Contains(f, StringComparer.OrdinalIgnoreCase))
+                            .ToList();
+                        if (lateExcelFiles.Count > 0)
+                        {
+                            var handledFileNames = new HashSet<string>(allFiles.Select(f => Path.GetFileName(f)!), StringComparer.OrdinalIgnoreCase);
+                            var lateImageFiles = Directory.EnumerateFiles(folder)
+                                .Where(f => SupportedExtensions.Contains(Path.GetExtension(f)))
+                                .Where(f => !handledFileNames.Contains(Path.GetFileName(f)))
+                                .ToList();
+
+                            var earliestLateWrite = lateExcelFiles.Concat(lateImageFiles)
+                                .Select(File.GetLastWriteTime)
+                                .DefaultIfEmpty(DateTime.Now)
+                                .Min();
+                            var continuationName = $"Gonderim_{earliestLateWrite:yyyyMMdd_HHmmss}_{Guid.NewGuid().ToString("N")[..8]}";
+                            var continuationFolder = Path.Combine(new DirectoryInfo(folder).Parent!.FullName, continuationName);
+                            Directory.CreateDirectory(continuationFolder);
+
+                            foreach (var f in lateExcelFiles.Concat(lateImageFiles))
+                                File.Move(f, Path.Combine(continuationFolder, Path.GetFileName(f)));
+
+                            File.WriteAllText(Path.Combine(continuationFolder, "devam_kaynak_klasoru.txt"),
+                                $"Bu klasör, '{Path.GetFileName(folder)}' klasörü işlenirken (OCR/damgalama sürerken) o klasöre " +
+                                $"sonradan düşen {lateExcelFiles.Count} Excel + {lateImageFiles.Count} görsel için otomatik oluşturuldu " +
+                                $"(bkz. Worker.cs, 2026-08-19 güvenlik ağı). Zaman: {DateTime.Now:yyyy-MM-dd HH:mm:ss}.{Environment.NewLine}",
+                                Encoding.UTF8);
+
+                            _logger.LogWarning(
+                                "Klasör {Folder}: işlem sürerken {ExcelCount} yeni Excel + {ImageCount} yeni görsel geldi — kaybolmasınlar diye {Continuation} klasörüne taşındı, bir sonraki turda bağımsız işlenecek.",
+                                folder, lateExcelFiles.Count, lateImageFiles.Count, continuationName);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex,
+                            "Klasör {Folder}: işlem sırasında gelen yeni Excel/görselleri ayrı klasöre taşırken hata oluştu — bu turda kurtarılamadılar, orijinal klasörde kalacaklar.",
+                            folder);
                     }
 
                     stopwatch.Stop();
@@ -1317,6 +1422,26 @@ public class Worker : BackgroundService
     // atlanan satırı listelenir, gerisi sayıyla özetlenir).
     private const int CustomerReportMaxSkippedListed = 15;
 
+    /// <summary>Gonderim klasörünün müşteri tarafından GERÇEKTEN oluşturulduğu (gönderildiği) anı
+    /// döner — klasör adındaki Gonderim_yyyyMMdd_HHmmss_... zaman damgasından ayrıştırılır. Bu,
+    /// dosya sisteminin CreationTime'ından daha güvenilir: çoklu marka bölmesinde (_grupN) grup
+    /// klasörü worker tarafından İŞLEME SIRASINDA (bölme anında) yaratılır, o anki CreationTime
+    /// müşterinin asıl gönderim anını değil bölme anını gösterir; oysa klasör adının başındaki
+    /// zaman damgası bölme sonrasında da (Gonderim_..._grupN) korunur. Ad beklenen kalıba
+    /// uymuyorsa (savunmacı fallback, örn. eski/elle oluşturulmuş test klasörleri) dosya
+    /// sisteminin CreationTime'ına düşülür.</summary>
+    private static DateTime GetFolderCreatedAt(string folder)
+    {
+        var name = Path.GetFileName(folder);
+        var m = FolderTimestampRegex.Match(name);
+        if (m.Success && DateTime.TryParseExact(m.Groups[1].Value + m.Groups[2].Value, "yyyyMMddHHmmss",
+                System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var parsed))
+        {
+            return parsed;
+        }
+        return Directory.GetCreationTime(folder);
+    }
+
     private static string BuildCustomerFacingReport(
         string folder, BrandMultiplier brand, decimal rateValue, int totalImages,
         List<ImageResult> imageResults, List<SendResult> sendResults, TimeSpan duration)
@@ -1328,6 +1453,7 @@ public class Worker : BackgroundService
         var sb = new StringBuilder();
         sb.AppendLine("=== PriceBot Raporu ===");
         sb.AppendLine($"Klasör: {Path.GetFileName(folder)}");
+        sb.AppendLine($"Gönderim tarihi: {GetFolderCreatedAt(folder):yyyy-MM-dd HH:mm:ss}");
         sb.AppendLine($"Marka: {brand.FullName}  |  Kur: 1 USD = {rateValue} TRY  |  Süre: {duration.TotalSeconds:N0} sn");
         sb.AppendLine();
         sb.AppendLine($"Toplam görsel: {totalImages}  |  Fiyatlandırılan: {matchedCount}  |  Atlanan/Hatalı: {skipped.Count}  |  Gönderilen: {sentOk}/{sendResults.Count}");
