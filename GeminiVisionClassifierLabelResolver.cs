@@ -31,6 +31,34 @@ public sealed partial class GeminiVisionClassifier
     // schema şekli tutmaya gerek yok, ikisi de "aday listesinden bir string" istiyor.
     private const string ResponseFieldName = "value";
 
+    /// <summary>Gemini'nin structured-output <c>responseSchema.enum</c> dizisi için CANLI ÖLÇÜLMÜŞ bir
+    /// güvenlik eşiği (2026-08-24, gerçek üretim vakası: NGZ/"KADİFE ALİSA -PİYASA" klasörü, marka
+    /// MİNİ PAKEL — OCR/dosya adı/letterhead marka bulamayınca görü zincirine düştü, Gemini HEM
+    /// birincil HEM yedek modelde HTTP 400 INVALID_ARGUMENT verdi). <c>Spike/GeminiBrandProbe</c> ile
+    /// AYNI görsel + GERÇEK Nebim marka listesiyle (322 marka) izole edilip bisection'la doğrulandı:
+    /// 310 markalık bir alt kümede BAŞARILI (doğru markayı buldu), 315+ markada HER SEFERİNDE 400 —
+    /// enum dizisinin (muhtemelen serileştirilmiş toplam boyutuna bağlı, yuvarlak bir eleman-sayısı
+    /// sınırı değil) Gemini tarafında sert bir üst sınırı var. AYNI görsel + AYNI tam listeyle Groq VE
+    /// Claude TEK istekte doğru markayı (MİNİ PAKEL) buldu — yani bu Gemini'ye ÖZGÜ bir kısıt, çoklu-
+    /// sağlayıcı zincirinin kendisi sağlam. Nebim'in marka listesi SADECE büyüyor (CLAUDE.md'deki
+    /// tarihsel notlarda 300/307/310/311 idi, şimdi 322) — yani bu sınır ŞU AN HER ZAMAN aşılıyor:
+    /// birincil+yedek model her fallback tetiklenişinde garantili 2×400 veriyor (~9 sn gecikme +
+    /// gürültülü WARN logu) ve zaten her seferinde bir sonraki sağlayıcıya (Groq) düşüyordu.
+    /// Adayları KIRPMAK (ör. <c>Take(N)</c>) YANLIŞ olurdu — doğru marka alfabetik sırada kırpılan
+    /// kısımdaysa Gemini'yi sessizce "BULUNAMADI"ya zorlardı (halüsinasyon değil ama sessiz bir
+    /// doğruluk kaybı). Bunun yerine: liste bu eşiği aşarsa <see cref="ClassifyBrandAsync"/> Gemini'yi
+    /// HİÇ DENEMEDEN atlar (Groq zaten TEK istekte tüm listeyi sorunsuz işliyor, bkz. yukarıdaki canlı
+    /// test). 280 (gözlemlenen ~310-314 sınırının altında, marka adı uzunluğu farklılıklarına karşı
+    /// bilinçli bir pay) appsettings.json'dan override edilmiyor çünkü Google'ın gerçek sınırının tam
+    /// değeri/kuralı dokümante değil — bu SADECE gözlemlenen bir eşik, kod içi sabit kalması bilinçli
+    /// (aşırı mühendislik yapılmadı). <see cref="ClassifyCodeAsync"/> etkilenmedi: Excel kod listeleri
+    /// çok daha küçük (gözlemlenen en büyüğü 134, bkz. CLAUDE.md "MİNİCE" notu). Burada (SkiaSharp/
+    /// HttpClient'sız partial'da) tutulmasının nedeni test edilebilirlik — bkz. dosya başı yorumu.</summary>
+    private const int MaxBrandCandidatesForSchema = 280;
+
+    /// <summary>Pure/testable eşik kontrolü — bkz. <see cref="MaxBrandCandidatesForSchema"/>.</summary>
+    internal static bool ExceedsBrandSchemaLimit(int candidateCount) => candidateCount > MaxBrandCandidatesForSchema;
+
     /// <summary>Nebim view'inde aynı marka adı birden fazla satırda olabiliyor (HIPP, TABU
     /// gibi — bkz. BrandMatcher.cs başındaki aynı gözlem, NetCarpan'ları aynı olduğu için
     /// zararsız kabul ediliyor). Enum'a her ismi bir kez koymak için tekilleştirilir.</summary>

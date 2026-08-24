@@ -442,6 +442,40 @@ public class GeminiVisionClassifierExtractLabelTests
     }
 }
 
+/// <summary>GERÇEK VAKA (2026-08-24, NGZ "KADİFE ALİSA -PİYASA.xlsx" / MİNİ PAKEL): OCR/dosya adı/
+/// letterhead marka bulamayınca görü zincirine düşen bir klasörde Gemini, GERÇEK 322 markalık Nebim
+/// listesiyle HEM birincil (gemini-flash-latest) HEM yedek (gemini-flash-lite-latest) modelde HTTP
+/// 400 INVALID_ARGUMENT verdi (istek reddedildi, görsele hiç bakmadan). <c>Spike/GeminiBrandProbe</c>
+/// ile AYNI gerçek görsel + AYNI gerçek marka listesiyle canlı bisection yapıldı: 310 markada BAŞARILI
+/// (doğru markayı — MİNİ PAKEL — buldu), 315/320/322 markada HER SEFERİNDE 400. AYNI görsel + AYNI tam
+/// listeyle Groq VE Claude TEK istekte doğru markayı buldu — yani sorun sadece Gemini'nin enum
+/// boyutunda, çoklu-sağlayıcı zincirinin kendisi sağlam. <see cref="GeminiVisionClassifier.
+/// ExceedsBrandSchemaLimit"/> bu durumda Gemini'yi hiç denemeden atlayıp zinciri Groq'a taşıyor.</summary>
+public class GeminiVisionClassifierExceedsBrandSchemaLimitTests
+{
+    [Theory]
+    [InlineData(0, false)]
+    [InlineData(1, false)]
+    [InlineData(279, false)]
+    [InlineData(280, false)] // eşik dahil (280 = güvenli üst sınırın kendisi)
+    [InlineData(281, true)]
+    [InlineData(310, true)] // canlı testte GERÇEKTEN başarılı olan boyut — eşik yine de aşılmış sayılır (bilinçli güvenlik payı, bkz. dosya başı yorumu)
+    [InlineData(315, true)] // canlı testte GERÇEKTEN 400 veren boyut
+    [InlineData(322, true)] // 2026-08-24 üretim vakasındaki gerçek Nebim marka sayısı
+    public void EsikDogruUygulanir(int candidateCount, bool expected)
+    {
+        Assert.Equal(expected, GeminiVisionClassifier.ExceedsBrandSchemaLimit(candidateCount));
+    }
+
+    [Fact]
+    public void GercekVakadakiMarkaSayisiEsigiAsar()
+    {
+        // 2026-08-24 üretim log'unda görülen gerçek Nebim marka sayısı (322 geçerli marka) — bu
+        // sayıyla Gemini'nin HEM birincil HEM yedek modeli 400 veriyordu (bkz. dosya başı yorumu).
+        Assert.True(GeminiVisionClassifier.ExceedsBrandSchemaLimit(322));
+    }
+}
+
 /// <summary>BuildBrandUserPrompt, OCR ipucu enjeksiyonunu (2026-08-24, "markaları daha iyi tespit
 /// edebilmek") saf/testable şekilde uygular — GroqVisionClassifierLabelResolver/
 /// AnthropicVisionClassifierLabelResolver'daki AYNI desen.</summary>

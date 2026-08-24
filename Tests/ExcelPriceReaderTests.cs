@@ -949,6 +949,25 @@ public class ExcelPriceReaderTests
         var tokens = ExcelPriceReader.ExtractFileNameTokens("");
         Assert.Empty(tokens);
     }
+
+    /// <summary>Gerçek vaka (2026-08-24, NGZ "20260824_104620945_efe326_KADİFE ALİSA -PİYASA.xlsx" /
+    /// MİNİ PAKEL): bu klasörün marka tespiti WhatsApp sorusuna düşmüştü — dosya adı ve letterhead
+    /// GERÇEKTEN hiçbir marka bilgisi taşımıyor (doğrulandı: gerçek dosyanın sharedStrings.xml'i sadece
+    /// "NO/ÜRÜN KOD/BEDEN/FİYAT/ERKEK/KIZ" gibi 10 jenerik başlık dizesi içeriyor — üretici adı hiçbir
+    /// yerde yazılı değil). Dosya adı, satıcının KENDİ iş adını ("Alisa", aynı bilinen "ALİSA
+    /// MEVSİMLİK" karışık-katalog vakasıyla — bkz. CLAUDE.md "Karışık marka katalog riski" —AYNI
+    /// satıcı) taşıyor, üreticininkini (Mini Pakel) DEĞİL — bu satıcı için dosya-adı/letterhead
+    /// fallback'lerinin YAPISAL olarak asla işe yaramayacağını (bu tek dosyaya özgü bir eksiklik değil)
+    /// belgeler; gerçek marka sadece ürün fotoğrafındaki logodan (OCR/görü tespiti) çıkarılabilir.</summary>
+    [Fact]
+    public void ExtractFileNameTokens_GercekAlisaSaticiDosyaAdi_UreticiMarkasiylaEslesmez()
+    {
+        var tokens = ExcelPriceReader.ExtractFileNameTokens("20260824_104620945_efe326_KADİFE ALİSA -PİYASA.xlsx");
+
+        var brands = new List<BrandMultiplier> { new("PAKEL", "MİNİ PAKEL", 1.0m) };
+        var outcome = BrandMatcher.MatchFromOcrTokens(tokens, brands);
+        Assert.Null(outcome.Brand);
+    }
 }
 
 /// <summary>ClosedXML sadece OOXML (.xlsx/.xlsm, ZIP tabanlı) formatını açabilir; eski .xls (BIFF,

@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PlatformTarget>x64</PlatformTarget>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Kopya değil, gerçek üretim dosyaları — bkz. ../BrandSearchProbe/brandsearchprobe.csproj (aynı desen).
+         2026-08-24: 13:04:22'de canlı üretimde görülen "gorsel_20260824_104609064_26899b.jpg için
+         Gemini HTTP 400 (INVALID_ARGUMENT) — hem birincil hem yedek modelde" hatasını izole/yeniden
+         üretmek için: ClassifyBrandAsync'i GERÇEK Nebim marka listesi + GERÇEK görselle, önce
+         ocrHint'siz sonra ocrHint'li çağırıp hangisinin 400 verdiğine bakar. -->
+    <Compile Include="..\..\NebimBrandProvider.cs" />
+    <Compile Include="..\..\BrandMatcher.cs" />
+    <Compile Include="..\..\IBrandClassifier.cs" />
+    <Compile Include="..\..\IProductCodeClassifier.cs" />
+    <Compile Include="..\..\RetryDelayParser.cs" />
+    <Compile Include="..\..\GeminiVisionClassifier.cs" />
+    <Compile Include="..\..\GeminiVisionClassifierLabelResolver.cs" />
+    <Compile Include="..\..\GroqVisionClassifier.cs" />
+    <Compile Include="..\..\GroqVisionClassifierLabelResolver.cs" />
+    <Compile Include="..\..\AnthropicVisionClassifier.cs" />
+    <Compile Include="..\..\AnthropicVisionClassifierLabelResolver.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="5.2.2" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.0" />
+    <PackageReference Include="SkiaSharp" Version="2.88.8" />
+  </ItemGroup>
+
+</Project>

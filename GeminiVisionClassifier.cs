@@ -186,6 +186,16 @@ public sealed partial class GeminiVisionClassifier : IProductCodeClassifier, IBr
 
         var candidateNames = BuildDistinctCandidateNames(candidates);
         if (candidateNames.Count == 0) return (null, null, false);
+        if (ExceedsBrandSchemaLimit(candidateNames.Count))
+        {
+            // bkz. GeminiVisionClassifierLabelResolver.cs MaxBrandCandidatesForSchema dokümantasyonu —
+            // kırpmak yerine bu sağlayıcıyı hiç denemeden atlıyoruz, zincirdeki sıradaki sağlayıcı
+            // (Groq/Claude) tüm listeyi tek istekte sorunsuz işleyebiliyor.
+            _logger.LogInformation(
+                "Gemini görü tespiti: aday marka sayısı ({Count}) Gemini'nin response schema sınırını (~{Threshold}) aşabileceği için bu sağlayıcı atlanıyor, sıradaki sağlayıcı deneniyor.",
+                candidateNames.Count, MaxBrandCandidatesForSchema);
+            return (null, null, false);
+        }
 
         var userPrompt = BuildBrandUserPrompt(BrandUserPrompt, ocrHint);
         foreach (var path in imagePaths.Take(MaxImages))

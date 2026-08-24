@@ -999,8 +999,20 @@ public class Worker : BackgroundService
             // gönderimi başarısız olursa (örn. bot kapalı) klasör "cevap bekliyor" durumunda
             // kilitli kalmasın — işaretçisiz klasör bir sonraki turda baştan işlenir ve soru
             // (öneriler olmadan, genel hâliyle de olsa) yeniden gönderilmeye çalışılır.
-            File.Move(answerPath, Path.Combine(folder, $"marka_cevap_red_{DateTime.Now:yyyyMMdd_HHmmss}.txt"), overwrite: true);
-            File.Delete(questionPath);
+            // 2026-08-24: SendBrandQuestionAsync'teki aynı düzeltmeyle aynı gerekçeyle korumalı —
+            // klasör bu iki dosya işlemi arasında harici bir etkenle kaybolursa (bkz. o metodun
+            // yorumu) tüm döngüyü kesmesin, sadece bu klasörü atlayıp bir sonraki turda tekrar
+            // denensin.
+            try
+            {
+                File.Move(answerPath, Path.Combine(folder, $"marka_cevap_red_{DateTime.Now:yyyyMMdd_HHmmss}.txt"), overwrite: true);
+                File.Delete(questionPath);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                _logger.LogWarning(ex, "Klasör {Folder}: marka_cevap.txt arşivlenemedi/marka_sorusu.txt silinemedi (klasör artık mevcut olmayabilir) — bu turdaki diğer klasörler etkilenmeden işlenmeye devam ediyor.", folder);
+                return null;
+            }
 
             // Kullanıcı bir önceki listede "Diğer"i seçmişti (bkz. OtherBrandOptionText) — tekrar
             // liste sunmak anlamsız (zaten reddetti), doğrudan serbest metin iste, "listede
@@ -1259,12 +1271,35 @@ public class Worker : BackgroundService
             return;
         }
 
-        File.WriteAllText(questionPath,
-            $"Gönderilme zamanı: {DateTime.Now:yyyy-MM-dd HH:mm:ss}{Environment.NewLine}" +
-            $"Alıcı: {senderPhone}{Environment.NewLine}" +
-            (options is { Count: > 0 } ? $"Seçenekler: {string.Join(" | ", options)}{Environment.NewLine}" : "") +
-            $"Soru: {question}{Environment.NewLine}",
-            Encoding.UTF8);
+        // 2026-08-24 DÜZELTME (gerçek üretim log'u: metin BAŞARIYLA gönderildikten (yukarıdaki satır)
+        // hemen sonra DirectoryNotFoundException — klasör, ~100 sn'lik çoklu-sağlayıcı görü tespiti
+        // zinciri sürerken (art arda Gemini timeout'ları) diskten silinmiş/taşınmıştı; aynı anda o
+        // klasördeki görsellerin "Görsel açılamadı" vermeye başlaması da bunu doğruluyor — muhtemel
+        // sebep harici bir etken (antivirüs/Denetimli Klasör Erişimi ya da elle bir müdahale, bkz.
+        // CLAUDE.md). Eskiden bu File.WriteAllText korumasızdı: hata tüm dış while döngüsünün genel
+        // catch'ine kadar sızıp o turda işlenmekte olan TÜM klasör kuyruğunu erken kesiyordu — üstelik
+        // müşteriye soru ZATEN gönderilmiş olduğu için (yukarıdaki satır başarıyla tamamlandı) bu,
+        // cevabın hiçbir zaman yazılamayacağı bir klasöre "sordum ama işaretleyemedim" durumunda
+        // kalan, kurtarılamaz bir gönderim yaratıyordu. Artık: klasör gerçekten kayıpsa (ya da örn.
+        // anlık bir dosya kilidi varsa) sadece uyarı loglanır, bu turdaki DİĞER klasörler etkilenmeden
+        // işlenmeye devam eder — HttpClient.Timeout düzeltmesiyle (bkz. TrySendTextAsync) aynı ruh:
+        // beklenmedik ama TEK bir klasöre özgü bir hata, tüm döngüyü kesmemeli.
+        try
+        {
+            File.WriteAllText(questionPath,
+                $"Gönderilme zamanı: {DateTime.Now:yyyy-MM-dd HH:mm:ss}{Environment.NewLine}" +
+                $"Alıcı: {senderPhone}{Environment.NewLine}" +
+                (options is { Count: > 0 } ? $"Seçenekler: {string.Join(" | ", options)}{Environment.NewLine}" : "") +
+                $"Soru: {question}{Environment.NewLine}",
+                Encoding.UTF8);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _logger.LogWarning(ex,
+                "Klasör {Folder}: marka sorusu {Recipient} numarasına gönderildi AMA marka_sorusu.txt işaretçisi yazılamadı (klasör artık mevcut olmayabilir) — bu turdaki diğer klasörler etkilenmeden işlenmeye devam ediyor.",
+                folder, senderPhone);
+            return;
+        }
         _logger.LogInformation("Klasör {Folder}: marka sorusu {Recipient} numarasına gönderildi, cevap bekleniyor.", folder, senderPhone);
     }
 
