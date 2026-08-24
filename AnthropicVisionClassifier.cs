@@ -280,7 +280,11 @@ public sealed partial class AnthropicVisionClassifier : IProductCodeClassifier, 
             }
             return new LabelResult(label);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        // 2026-08-24 DÜZELTME: bkz. GeminiVisionClassifier.cs'teki AYNI düzeltmenin dosya-içi
+        // yorumu — HttpClient.Timeout'un fırlattığı TaskCanceledException, ct GERÇEKTEN iptal
+        // edilmediği sürece burada yakalanıp IsTransient=true olarak işlenmeli, yoksa Claude
+        // timeout'u da aynı şekilde tüm klasör turunu erken kesiyordu.
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
             _logger.LogWarning(ex, "Claude görü tespiti: istek hatası.");
             return new LabelResult(null, IsTransient: true);

@@ -433,7 +433,20 @@ public sealed partial class GeminiVisionClassifier : IProductCodeClassifier, IBr
 
             return new GeminiHttpResult(true, false, false, false, null, (int)resp.StatusCode, responseText);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        // 2026-08-24 DÜZELTME (gerçek üretim log'u: "TaskCanceledException ... HttpClient.Timeout
+        // of 45 seconds elapsing" ardından ~30 dk'lık kesinti): _http.Timeout dolduğunda fırlatılan
+        // TaskCanceledException bir OperationCanceledException ALT SINIFIDIR, ama servis
+        // KAPANDIĞI (stoppingToken iptal edildiği) için değil — sadece Gemini isteğe 45 sn içinde
+        // cevap vermediği için oluşur. Eski filtre ("ex is not OperationCanceledException") bunu
+        // "gerçek iptal" sanıp bu catch'i ATLIYORDU: hata IsTransient=true olarak işlenip "sıradaki
+        // görsele/sağlayıcıya geç" akışına hiç girmeden ClassifyBrandAsync/ClassifyCodeAsync'in
+        // ÜZERİNDEN, ResolveFolderBrandAsync'ten, Worker.cs'in ana foreach'inden geçip dış while
+        // döngüsünün genel catch'ine kadar sızıyordu — bu da o turda işlenmekte olan TÜM klasör/
+        // görsel kuyruğunu (sadece o an sorgulanan görseli değil) erken kesiyordu. Düzeltme:
+        // SADECE ct GERÇEKTEN iptal edildiyse (servis kapanıyor) yukarı bırak; aksi halde
+        // (HttpClient'ın kendi iç timeout'u dahil) burada yakalayıp IsTransient=true dönerek
+        // tasarlanan "geçici hata, devam et" akışına düş.
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
             // Ağ hatası/timeout/DNS vb. — her zaman geçici sayılır (bkz. IsTransient dokümantasyonu).
             _logger.LogWarning(ex, "Gemini görü tespiti ({Model}): istek hatası.", model);

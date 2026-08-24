@@ -1283,7 +1283,17 @@ public class Worker : BackgroundService
             _logger.LogInformation("Metin gönderimi: {Recipient} -> {Status}", recipient, resp.StatusCode);
             return new SendResult("(metin)", recipient, resp.IsSuccessStatusCode, ((int)resp.StatusCode) + " " + resp.StatusCode);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        // 2026-08-24 DÜZELTME (gerçek üretim log'u: Gemini 45 sn HttpClient.Timeout'u bir
+        // TaskCanceledException — yani bir OperationCanceledException alt sınıfı — fırlatıyor,
+        // ama bu servis KAPANDIĞI için değil, sadece bot'un/API'nin isteğe zamanında cevap
+        // vermemesinden kaynaklanıyor. Eski filtre ("ex is not OperationCanceledException") bunu
+        // "gerçek iptal" sanıp BU catch'i atlıyordu — hata SendResult'a hiç düşmeden dış while
+        // döngüsüne kadar sızıp o turda işlenmekte olan TÜM klasör/görsel kuyruğunu erken
+        // kesiyordu (Worker.ExecuteAsync'in dıştaki genel catch'i sonunda yakalıyordu ama önce
+        // aynı turdaki diğer tüm işler yarıda kalıyordu). Düzeltme: SADECE ct (=stoppingToken)
+        // GERÇEKTEN iptal edildiyse (servis kapanıyor) yukarı bırak; aksi halde (HttpClient'ın
+        // kendi iç timeout'u dahil) burada yakalayıp normal başarısız-gönderim akışına düş.
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
             _logger.LogError(ex, "Metin gönderim hatası: {Recipient}", recipient);
             return new SendResult("(metin)", recipient, false, $"HATA: {ex.Message}");
@@ -1302,7 +1312,10 @@ public class Worker : BackgroundService
             _logger.LogInformation("Gönderim: {File} -> {Recipient} -> {Status}", fileName, recipient, resp.StatusCode);
             return new SendResult(fileName, recipient, success, ((int)resp.StatusCode).ToString() + " " + resp.StatusCode);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        // 2026-08-24 DÜZELTME: bkz. TrySendTextAsync'teki AYNI düzeltmenin yorumu — HttpClient.
+        // Timeout'un fırlattığı TaskCanceledException, ct GERÇEKTEN iptal edilmediği sürece burada
+        // yakalanmalı, yoksa bir gönderim timeout'u tüm klasör turunu erken kesiyordu.
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
             _logger.LogError(ex, "Gönderim hatası: {File} -> {Recipient}", fileName, recipient);
             return new SendResult(fileName, recipient, false, $"HATA: {ex.Message}");
