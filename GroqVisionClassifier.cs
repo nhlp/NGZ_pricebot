@@ -42,25 +42,45 @@ namespace PriceBotPipeline;
 /// zincirine burada gerek görülmedi.
 ///
 /// RESMİ/TOPLULUK BİR .NET SDK'SI KULLANILMIYOR — diğer sınıflandırıcılarla AYNI gerekçeyle
-/// (dependency-hafifliği) ham HTTP POST + System.Text.Json.</summary>
-public sealed partial class GroqVisionClassifier : IProductCodeClassifier
+/// (dependency-hafifliği) ham HTTP POST + System.Text.Json.
+///
+/// <see cref="IBrandClassifier"/> DA UYGULAR (2026-08-24): marka tespiti eskiden SADECE Gemini
+/// (tek key) ile yapılıyordu — bkz. o arayüzün dosya başı yorumu (kota direnci + FARKLI vision
+/// modellerinin AYNI dekoratif logoyu farklı tanıyabilmesi). <see cref="ClassifyBrandAsync"/>,
+/// <see cref="ClassifyCodeAsync"/>'in TEK-görsel/TEK-istek deseninden farklı olarak
+/// GeminiVisionClassifier.ClassifyBrandAsync'teki "ilk N görseli sırayla dene, ilk başarıda dur"
+/// desenini tekrarlar (klasör tek marka olduğu için tek görsel yeterli, birden fazlasını aynı
+/// anda göndermek doğruluğu artırmaz, sadece token harcar).</summary>
+public sealed partial class GroqVisionClassifier : IProductCodeClassifier, IBrandClassifier
 {
     private const string ApiUrl = "https://api.groq.com/openai/v1/chat/completions";
     private const int MaxLongEdgePixels = 1024;
     private const int JpegQuality = 85;
     private const int MaxTokens = 512;
+    private const int MaxBrandImages = 4;
 
-    private const string SystemPrompt =
+    private const string CodeSystemPrompt =
         "Sen bir toptan çocuk giyim ürün fotoğraflarındaki/etiketlerindeki ürün kodlarını (SKU) " +
         "okuyan bir görsel sınıflandırma asistanısın. Cevabın SADECE verilen kapalı listeden bir " +
         "ürün kodu ya da 'BULUNAMADI' olmalı.";
-    private const string UserPrompt =
+    private const string CodeUserPrompt =
         "Bu bir toptan ürün fotoğrafı/etiketidir; üzerinde küçük yazılı bir ürün kodu (SKU) " +
         "olabilir — etikette, köşede, kenarda ya da ürünün üzerinde basılı/yazılı sayısal ya da " +
         "alfanümerik bir kod arayın (beden/yaş numaralarıyla KARIŞTIRMAYIN — kod genelde daha uzun " +
         "veya 'code:'/'kod:' gibi bir önekle birlikte gelir). Görünen kodu report_code aracıyla " +
         "bildir. Kod bulanık, küçük ya da kısmen kapalı olabilir — dikkatlice bakın. Listede olmayan " +
         "bir kod görüyorsan veya emin değilsen kesinlikle 'BULUNAMADI' de; listede olmayan bir kod UYDURMA.";
+
+    private const string BrandSystemPrompt =
+        "Sen bir e-ticaret/toptan çocuk giyim ürün fotoğraflarındaki marka logolarını tanıyan bir " +
+        "görsel sınıflandırma asistanısın. Cevabın SADECE verilen kapalı listeden bir marka adı ya " +
+        "da 'BULUNAMADI' olmalı.";
+    private const string BrandUserPrompt =
+        "Bu görsel bir çocuk giyim ürününün etiketi/fotoğrafıdır. Görselde görünen marka adını, " +
+        "verilen listeden seçerek report_brand aracıyla bildir. Marka yazısı bazen dekoratif/stilize " +
+        "bir fontla, bazen de harfler değil tamamen bir grafik/logo/nakış olarak gelebilir — sadece " +
+        "harfleri okumaya çalışma, görsel örüntüyü de değerlendir. Listede olmayan bir marka " +
+        "görüyorsan veya emin değilsen kesinlikle 'BULUNAMADI' de; listede olmayan bir isim UYDURMA.";
 
     private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(2);
 
@@ -112,17 +132,18 @@ public sealed partial class GroqVisionClassifier : IProductCodeClassifier
         }
 
         _logger.LogInformation("Groq görü tespiti: ürün kodu için soruluyor -> {File}", Path.GetFileName(imagePath));
-        var request = BuildRequest(_model, MaxTokens, SystemPrompt, UserPrompt, base64, "image/jpeg", codes);
+        var request = BuildRequest(_model, MaxTokens, CodeSystemPrompt, CodeUserPrompt, base64, "image/jpeg", codes,
+            CodeToolName, "Görselde bulunan ürün kodunu (ya da BULUNAMADI) verilen kapalı listeden bildirir.");
         var json = JsonSerializer.Serialize(request, GroqJsonContext.Default.GroqRequest);
 
-        var result = await SendClassifyRequestAsync(json, ct);
+        var result = await SendClassifyRequestAsync(json, CodeToolName, ct);
 
         if (result.Label is null && result.IsTransient && !result.IsQuotaExceeded)
         {
             _logger.LogInformation("Groq görü tespiti: '{File}' için geçici bir hata alındı, {Delay} sn sonra tekrar denenecek.",
                 Path.GetFileName(imagePath), RetryDelay.TotalSeconds);
             await Task.Delay(RetryDelay, ct);
-            result = await SendClassifyRequestAsync(json, ct);
+            result = await SendClassifyRequestAsync(json, CodeToolName, ct);
         }
 
         if (result.Label is null)
@@ -149,9 +170,79 @@ public sealed partial class GroqVisionClassifier : IProductCodeClassifier
         return (result.Label, false, null);
     }
 
+    /// <summary>Marka tespiti — GeminiVisionClassifier.ClassifyBrandAsync ile AYNI davranış
+    /// sözleşmesi (bkz. IBrandClassifier.cs dosya başı yorumu): görseller TEK TEK sıralı denenir,
+    /// ilk başarılı sonuçta durulur; KALICI hatada (config/içerik engeli) hemen durulup
+    /// <c>ApiFailed=true</c> döner (Worker.cs sıradaki sağlayıcıya geçer); GEÇİCİ hata/kota/
+    /// "BULUNAMADI"da sıradaki görsel denenir. Kota (429) burada Gemini'nin ayrıntılı bekle-ve-
+    /// tekrar-dene zincirine sahip DEĞİL (bkz. sınıf başı "BİLİNÇLİ BASİTLEŞTİRME" notu) — kısa bir
+    /// bekleme + tek tekrar deneme yeterli, kalıcı sayılıp sıradaki görsele geçiliyor.</summary>
+    public async Task<(BrandMultiplier? Brand, string? RawLabel, bool ApiFailed)> ClassifyBrandAsync(
+        IReadOnlyList<string> imagePaths, IReadOnlyList<BrandMultiplier> candidates, string? ocrHint, CancellationToken ct)
+    {
+        if (_apiKey.Length == 0 || imagePaths.Count == 0 || candidates.Count == 0)
+            return (null, null, false);
+
+        var candidateNames = BuildDistinctCandidateNames(candidates);
+        if (candidateNames.Count == 0) return (null, null, false);
+
+        var userPrompt = BuildBrandUserPrompt(BrandUserPrompt, ocrHint);
+        foreach (var path in imagePaths.Take(MaxBrandImages))
+        {
+            string base64;
+            try
+            {
+                base64 = BuildInlineImageBase64(path);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Groq görü tespiti: görsel hazırlanamadı, atlanıyor.");
+                continue;
+            }
+
+            _logger.LogInformation("Groq görü tespiti: marka için soruluyor -> {File}", Path.GetFileName(path));
+            var request = BuildRequest(_model, MaxTokens, BrandSystemPrompt, userPrompt, base64, "image/jpeg", candidateNames,
+                BrandToolName, "Görselde bulunan marka adını (ya da BULUNAMADI) verilen kapalı listeden bildirir.");
+            var json = JsonSerializer.Serialize(request, GroqJsonContext.Default.GroqRequest);
+
+            var result = await SendClassifyRequestAsync(json, BrandToolName, ct);
+            if (result.Label is null && result.IsTransient && !result.IsQuotaExceeded)
+            {
+                _logger.LogInformation("Groq görü tespiti: '{File}' için geçici bir hata alındı, {Delay} sn sonra tekrar denenecek.",
+                    Path.GetFileName(path), RetryDelay.TotalSeconds);
+                await Task.Delay(RetryDelay, ct);
+                result = await SendClassifyRequestAsync(json, BrandToolName, ct);
+            }
+
+            if (result.Label is null)
+            {
+                if (result.IsQuotaExceeded || result.IsTransient)
+                {
+                    _logger.LogInformation("Groq görü tespiti: '{File}' için {Reason}, sıradaki görsel deneniyor.",
+                        Path.GetFileName(path), result.IsQuotaExceeded ? "kota/rate-limit (429) alındı" : "tüm denemelerden sonra da geçici bir hata alındı");
+                    continue;
+                }
+                _logger.LogWarning("Groq görü tespiti: '{File}' için kalıcı bir hata alındı, marka tespiti bu klasörde bırakılıyor.", Path.GetFileName(path));
+                return (null, null, true); // kalıcı hata (config/içerik engeli)
+            }
+            if (result.Label == NotFoundLabel)
+            {
+                _logger.LogInformation("Groq görü tespiti: '{File}' için marka BULUNAMADI yanıtı geldi, sıradaki görsel deneniyor.", Path.GetFileName(path));
+                continue;
+            }
+
+            var brand = ResolveLabelToBrand(result.Label, candidates);
+            if (brand is not null) return (brand, result.Label, false);
+
+            _logger.LogWarning("Groq görü marka tespiti: dönen etiket ('{Label}') aday listesiyle eşleşmedi.", result.Label);
+        }
+
+        return (null, null, false);
+    }
+
     private readonly record struct LabelResult(string? Label, bool IsTransient = false, bool IsQuotaExceeded = false, TimeSpan? RetryDelay = null);
 
-    private async Task<LabelResult> SendClassifyRequestAsync(string json, CancellationToken ct)
+    private async Task<LabelResult> SendClassifyRequestAsync(string json, string expectedToolName, CancellationToken ct)
     {
         try
         {
@@ -175,7 +266,7 @@ public sealed partial class GroqVisionClassifier : IProductCodeClassifier
                 return new LabelResult(null, isTransient, isQuotaExceeded, retryDelay);
             }
 
-            var label = ExtractLabel(responseText, out var blockReason);
+            var label = ExtractLabel(responseText, expectedToolName, out var blockReason);
             if (blockReason is not null)
             {
                 _logger.LogWarning("Groq görü tespiti: yanıt beklenmedik biçimde geldi ({Reason}).", blockReason);

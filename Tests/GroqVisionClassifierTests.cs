@@ -109,7 +109,7 @@ public class GroqVisionClassifierBuildRequestTests
     {
         var request = GroqVisionClassifier.BuildRequest(
             "qwen/qwen3.6-27b", 512, "sistem", "kullanıcı",
-            "AAAA", "image/jpeg", ["1270", "1282", "1291"]);
+            "AAAA", "image/jpeg", ["1270", "1282", "1291"], "report_code", "kod bildir");
 
         var enumValues = request.Tools[0].Function.Parameters.Properties["value"].Enum;
         Assert.Equal(["1270", "1282", "1291", "BULUNAMADI"], enumValues);
@@ -119,17 +119,31 @@ public class GroqVisionClassifierBuildRequestTests
     public void ToolChoiceZorunluFonksiyonuIsaretEder()
     {
         var request = GroqVisionClassifier.BuildRequest(
-            "model", 512, "s", "u", "AAAA", "image/jpeg", ["1291"]);
+            "model", 512, "s", "u", "AAAA", "image/jpeg", ["1291"], "report_code", "kod bildir");
 
         Assert.Equal("function", request.ToolChoice.Type);
         Assert.Equal(request.Tools[0].Function.Name, request.ToolChoice.Function.Name);
+    }
+
+    /// <summary>2026-08-24: BuildRequest artık toolName/toolDescription parametre alıyor (kod ve
+    /// marka tespiti AYRI araç adları kullanıyor) — verilen adın gerçekten hem Tools hem
+    /// ToolChoice'a yansıdığını kilitler.</summary>
+    [Fact]
+    public void OzelAracAdiToolsVeToolChoiceYaYansir()
+    {
+        var request = GroqVisionClassifier.BuildRequest(
+            "model", 512, "s", "u", "AAAA", "image/jpeg", ["MARKA"], "report_brand", "marka bildir");
+
+        Assert.Equal("report_brand", request.Tools[0].Function.Name);
+        Assert.Equal("marka bildir", request.Tools[0].Function.Description);
+        Assert.Equal("report_brand", request.ToolChoice.Function.Name);
     }
 
     [Fact]
     public void SistemMesajiTekMetinParcasiOlarakGelir()
     {
         var request = GroqVisionClassifier.BuildRequest(
-            "model", 512, "sistem istemi", "kullanıcı", "AAAA", "image/jpeg", ["1291"]);
+            "model", 512, "sistem istemi", "kullanıcı", "AAAA", "image/jpeg", ["1291"], "report_code", "kod bildir");
 
         var systemMsg = request.Messages[0];
         Assert.Equal("system", systemMsg.Role);
@@ -140,7 +154,7 @@ public class GroqVisionClassifierBuildRequestTests
     public void KullaniciMesajiMetinVeGorselParcasiIcerir()
     {
         var request = GroqVisionClassifier.BuildRequest(
-            "model", 512, "s", "kullanıcı istemi", "BASE64VERI", "image/jpeg", ["1291"]);
+            "model", 512, "s", "kullanıcı istemi", "BASE64VERI", "image/jpeg", ["1291"], "report_code", "kod bildir");
 
         var userMsg = request.Messages[1];
         Assert.Equal("user", userMsg.Role);
@@ -155,7 +169,7 @@ public class GroqVisionClassifierBuildRequestTests
     public void GercekApiSemasiylaSerilestirilebilir()
     {
         var request = GroqVisionClassifier.BuildRequest(
-            "qwen/qwen3.6-27b", 512, "s", "u", "AAAA", "image/jpeg", ["1291"]);
+            "qwen/qwen3.6-27b", 512, "s", "u", "AAAA", "image/jpeg", ["1291"], "report_code", "kod bildir");
 
         var json = JsonSerializer.Serialize(request, GroqJsonContext.Default.GroqRequest);
 
@@ -193,7 +207,7 @@ public class GroqVisionClassifierExtractLabelTests
     [Fact]
     public void BasariliYanittaEtiketCikarilir()
     {
-        var label = GroqVisionClassifier.ExtractLabel(ToolCallResponse("1291"), out var blockReason);
+        var label = GroqVisionClassifier.ExtractLabel(ToolCallResponse("1291"), "report_code", out var blockReason);
 
         Assert.Equal("1291", label);
         Assert.Null(blockReason);
@@ -202,7 +216,7 @@ public class GroqVisionClassifierExtractLabelTests
     [Fact]
     public void BasariliYanittaBulunamadiEtiketiDeAynenCikarilir()
     {
-        var label = GroqVisionClassifier.ExtractLabel(ToolCallResponse("BULUNAMADI"), out var blockReason);
+        var label = GroqVisionClassifier.ExtractLabel(ToolCallResponse("BULUNAMADI"), "report_code", out var blockReason);
 
         Assert.Equal("BULUNAMADI", label);
         Assert.Null(blockReason);
@@ -215,7 +229,7 @@ public class GroqVisionClassifierExtractLabelTests
             { "error": { "message": "Rate limit reached", "type": "rate_limit_exceeded", "code": "rate_limit_exceeded" } }
             """;
 
-        var label = GroqVisionClassifier.ExtractLabel(json, out var blockReason);
+        var label = GroqVisionClassifier.ExtractLabel(json, "report_code", out var blockReason);
 
         Assert.Null(label);
         Assert.Equal("rate_limit_exceeded", blockReason);
@@ -232,7 +246,7 @@ public class GroqVisionClassifierExtractLabelTests
             }
             """;
 
-        var label = GroqVisionClassifier.ExtractLabel(json, out var blockReason);
+        var label = GroqVisionClassifier.ExtractLabel(json, "report_code", out var blockReason);
 
         Assert.Null(label);
         Assert.Equal("stop", blockReason);
@@ -252,7 +266,7 @@ public class GroqVisionClassifierExtractLabelTests
             }
             """;
 
-        var label = GroqVisionClassifier.ExtractLabel(json, out var blockReason);
+        var label = GroqVisionClassifier.ExtractLabel(json, "report_code", out var blockReason);
 
         Assert.Null(label);
         Assert.Equal("NO_MATCHING_TOOL_CALL", blockReason);
@@ -263,7 +277,7 @@ public class GroqVisionClassifierExtractLabelTests
     {
         const string json = """{ "choices": [] }""";
 
-        var label = GroqVisionClassifier.ExtractLabel(json, out var blockReason);
+        var label = GroqVisionClassifier.ExtractLabel(json, "report_code", out var blockReason);
 
         Assert.Null(label);
         Assert.Equal("NO_CHOICES", blockReason);
@@ -272,7 +286,7 @@ public class GroqVisionClassifierExtractLabelTests
     [Fact]
     public void BozukJsonParseErrorDoner()
     {
-        var label = GroqVisionClassifier.ExtractLabel("{ bozuk json", out var blockReason);
+        var label = GroqVisionClassifier.ExtractLabel("{ bozuk json", "report_code", out var blockReason);
 
         Assert.Null(label);
         Assert.Equal("PARSE_ERROR", blockReason);
@@ -293,9 +307,40 @@ public class GroqVisionClassifierExtractLabelTests
             }
             """;
 
-        var label = GroqVisionClassifier.ExtractLabel(json, out var blockReason);
+        var label = GroqVisionClassifier.ExtractLabel(json, "report_code", out var blockReason);
 
         Assert.Null(label);
         Assert.Equal("PARSE_ERROR", blockReason);
+    }
+
+    /// <summary>2026-08-24: kod ve marka tespiti artık AYRI araç adları (report_code/report_brand)
+    /// kullanıyor — ExtractLabel'in beklenen araç adını gerçekten doğruladığını (yanlışlıkla
+    /// birbirinin yanıtını kabul etmediğini) kilitler.</summary>
+    [Fact]
+    public void BeklenenAracAdiFarkliysaEslesmezBulunamaz()
+    {
+        var label = GroqVisionClassifier.ExtractLabel(ToolCallResponse("1291"), "report_brand", out var blockReason);
+
+        Assert.Null(label);
+        Assert.Equal("NO_MATCHING_TOOL_CALL", blockReason);
+    }
+}
+
+/// <summary>GeminiVisionClassifierBuildBrandUserPromptTests ile AYNI desen/sözleşme.</summary>
+public class GroqVisionClassifierBuildBrandUserPromptTests
+{
+    [Fact]
+    public void IpucuYoksaPromptDegismez()
+    {
+        Assert.Equal("temel prompt", GroqVisionClassifier.BuildBrandUserPrompt("temel prompt", null));
+    }
+
+    [Fact]
+    public void IpucuVarsaEkBaglamOlarakEklenir()
+    {
+        var result = GroqVisionClassifier.BuildBrandUserPrompt("temel prompt", "JOJOMINI");
+
+        Assert.StartsWith("temel prompt", result);
+        Assert.Contains("JOJOMINI", result);
     }
 }

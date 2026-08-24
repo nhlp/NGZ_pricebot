@@ -9,7 +9,12 @@ namespace PriceBotPipeline;
 /// ile AYNI gerekçeyle ayrı dosyada (bkz. o dosyaların başlığı — SkiaSharp 2.88.8/3.x çakışması).</summary>
 public sealed partial class GroqVisionClassifier
 {
-    private const string ToolName = "report_code";
+    // Kod ve marka tespiti AYRI araç adları kullanır (2026-08-24, IBrandClassifier eklenmesiyle) —
+    // BuildRequest/ExtractLabel artık toolName parametre alıyor, ExtractLabel dönen tool_call'ın
+    // adının BEKLENEN toolName ile eşleştiğini doğruluyor (birden fazla farklı görevin yanıtları
+    // yanlışlıkla karışmasın diye, her ne kadar tek istekte tek araç tanımlansa da).
+    private const string CodeToolName = "report_code";
+    private const string BrandToolName = "report_brand";
     private const string NotFoundLabel = "BULUNAMADI";
 
     internal static bool IsModelConfigError(HttpStatusCode statusCode) =>
@@ -65,9 +70,10 @@ public sealed partial class GroqVisionClassifier
     /// base64 yerel dosya desteği "data:image/jpeg;base64,..." biçiminde).</summary>
     internal static GroqRequest BuildRequest(
         string model, int maxTokens, string systemPrompt, string userPrompt,
-        string imageBase64, string imageMediaType, List<string> candidateCodes)
+        string imageBase64, string imageMediaType, List<string> candidateLabels,
+        string toolName, string toolDescription)
     {
-        var enumValues = candidateCodes.Append(NotFoundLabel).ToList();
+        var enumValues = candidateLabels.Append(NotFoundLabel).ToList();
         var dataUri = $"data:{imageMediaType};base64,{imageBase64}";
 
         return new GroqRequest(
@@ -90,8 +96,8 @@ public sealed partial class GroqVisionClassifier
             Tools:
             [
                 new GroqTool("function", new GroqFunctionDef(
-                    Name: ToolName,
-                    Description: "Görselde bulunan ürün kodunu (ya da BULUNAMADI) verilen kapalı listeden bildirir.",
+                    Name: toolName,
+                    Description: toolDescription,
                     Parameters: new GroqParametersSchema(
                         Type: "object",
                         Properties: new Dictionary<string, GroqPropertySchema>
@@ -100,14 +106,14 @@ public sealed partial class GroqVisionClassifier
                         },
                         Required: ["value"])))
             ],
-            ToolChoice: new GroqToolChoice("function", new GroqToolChoiceFunction(ToolName)));
+            ToolChoice: new GroqToolChoice("function", new GroqToolChoiceFunction(toolName)));
     }
 
     /// <summary>Yanıttan zorunlu fonksiyon çağrısının `value` argümanını çıkarır — OpenAI-uyumlu
     /// function-calling sözleşmesinde `function.arguments` iç içe bir JSON OBJESİ DEĞİL, JSON-
     /// KODLANMIŞ BİR STRING'dir (Gemini/Claude'un doğrudan nesne döndürmesinden farklı) — bu yüzden
     /// İKİ AŞAMALI parse gerekir: dış gövde + arguments string'inin kendisi.</summary>
-    internal static string? ExtractLabel(string responseJson, out string? blockReason)
+    internal static string? ExtractLabel(string responseJson, string expectedToolName, out string? blockReason)
     {
         blockReason = null;
         try
@@ -139,7 +145,7 @@ public sealed partial class GroqVisionClassifier
             foreach (var call in toolCallsEl.EnumerateArray())
             {
                 if (!call.TryGetProperty("function", out var funcEl) ||
-                    !funcEl.TryGetProperty("name", out var nameEl) || nameEl.GetString() != ToolName ||
+                    !funcEl.TryGetProperty("name", out var nameEl) || nameEl.GetString() != expectedToolName ||
                     !funcEl.TryGetProperty("arguments", out var argsEl))
                     continue;
 
@@ -160,6 +166,30 @@ public sealed partial class GroqVisionClassifier
             return null;
         }
     }
+
+    /// <summary>GeminiVisionClassifierLabelResolver.BuildDistinctCandidateNames ile AYNI —
+    /// Nebim view'inde aynı marka adı birden fazla satırda olabilir, enum'a bir kez konur.</summary>
+    internal static List<string> BuildDistinctCandidateNames(IReadOnlyList<BrandMultiplier> candidates) =>
+        candidates
+            .Select(b => b.FullName)
+            .Where(n => !string.IsNullOrWhiteSpace(n))
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToList();
+
+    /// <summary>GeminiVisionClassifierLabelResolver.ResolveLabelToBrand ile AYNI.</summary>
+    internal static BrandMultiplier? ResolveLabelToBrand(string label, IReadOnlyList<BrandMultiplier> candidates) =>
+        candidates.FirstOrDefault(b => string.Equals(b.FullName, label, StringComparison.Ordinal));
+
+    /// <summary>GeminiVisionClassifierLabelResolver.BuildBrandUserPrompt ile AYNI desen — bkz. o
+    /// metodun dokümantasyonu (IBrandClassifier.cs "OCR İPUCU ENJEKSİYONU" notu).</summary>
+    internal static string BuildBrandUserPrompt(string baseBrandPrompt, string? ocrHint) =>
+        string.IsNullOrWhiteSpace(ocrHint)
+            ? baseBrandPrompt
+            : $"{baseBrandPrompt} EK İPUCU (kesin değil — OCR'ın bulanık/yaklaşık okuması): bu " +
+              $"görsellerde şuna benzer harfler görüldü: {ocrHint}. Bu ipucu markayı listeden " +
+              "seçerken yardımcı olabilir ama listedeki isimle TAM örtüşmüyorsa yine de görsele " +
+              "bakarak en uygun markayı seç; hiçbiri uymuyorsa 'BULUNAMADI' de.";
 }
 
 // --- Groq (OpenAI-uyumlu) chat/completions istek DTO'ları.

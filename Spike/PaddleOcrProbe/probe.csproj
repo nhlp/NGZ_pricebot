@@ -15,6 +15,7 @@
     <Compile Include="..\..\BrandMatcher.cs" />
     <Compile Include="..\..\IOcrEngine.cs" />
     <Compile Include="..\..\PaddleScanOcr.cs" />
+    <Compile Include="..\..\PaddleScanOcrMatching.cs" />
     <Compile Include="..\..\OcrEnginePool.cs" />
     <Compile Include="..\..\OcrEngineFactory.cs" />
   </ItemGroup>

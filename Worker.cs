@@ -153,6 +153,17 @@ public class Worker : BackgroundService
             ("Groq görü tespiti", groqClassifier),
             ("Claude görü tespiti", anthropicClassifier),
         };
+        // Marka tespiti (2026-08-24, kullanıcı isteği: "markaları daha iyi tespit edebilmek") artık
+        // AYNI dört sağlayıcıyı, AYNI sırayla dener — bkz. IBrandClassifier.cs dosya başı yorumu.
+        // Eskiden SADECE geminiClassifier (tek key) kullanılıyordu; codeClassifiers'daki gibi bir
+        // sağlayıcı bulamazsa (kota, hata YA DA gerçekten "BULUNAMADI") sıradaki denenir.
+        var brandClassifiers = new List<(string Source, IBrandClassifier Classifier)>
+        {
+            ("Gemini görü tespiti", geminiClassifier),
+            ("Gemini görü tespiti (ikincil key)", geminiClassifierSecondary),
+            ("Groq görü tespiti", groqClassifier),
+            ("Claude görü tespiti", anthropicClassifier),
+        };
 
         // PaddleOcrAll'ın altındaki native motor thread-affinity gerektirdiği için görseller
         // QueuedPaddleOcrAll'ın adanmış thread'leri üzerinden paralel taranır (bkz.
@@ -211,8 +222,20 @@ public class Worker : BackgroundService
         var ocrPool = OcrEngineFactory.Create(ocrParallelism, ocrCacheCapacity);
         var ocrPoolCreatedAt = DateTime.UtcNow;
 
-        _logger.LogInformation("PriceBot Worker başladı. IncomingRoot={IncomingRoot} BotSendUrl={BotSendUrl} OcrParalel={OcrParallelism} OcrCacheCapacity={OcrCacheCapacity} OcrRecycleHours={OcrRecycleHours} OcrRecycleMemoryMb={OcrRecycleMemoryMb} SendReportToCustomer={SendReportToCustomer}",
-            IncomingRoot, BotSendUrl, ocrParallelism, ocrCacheCapacity, ocrRecycleHours, ocrRecycleMemoryMb, sendReportToCustomer);
+        // Öğrenilmiş marka alias'ları ("kendini eğitme", 2026-08-21, kullanıcı isteği): müşteri
+        // marka sorusuna cevap yazdığında ya da Gemini görü modeli markayı bulduğunda, resmi
+        // Nebim adıyla eşleşmeyen ama artık doğrulanmış delil kelimeleri kalıcı hale getirilir —
+        // bkz. LearnedBrandAliasStore.cs dosya başı yorumu ve ResolveFolderBrandAsync içindeki
+        // kullanım. Uygulama dizininde appsettings.json'ın yanında duran basit bir JSON dosyası
+        // (gonderim_bekleyen.json ile aynı desen) — Nebim ERP şemasına dokunulmaz.
+        var learnedAliasPath = config["LearnedBrandAliasPath"]?.GetValue<string>()
+            is string configuredPath && !string.IsNullOrWhiteSpace(configuredPath)
+            ? configuredPath
+            : Path.Combine(appDir, "LearnedBrandAliases.json");
+        var aliasStore = new LearnedBrandAliasStore(learnedAliasPath, _logger);
+
+        _logger.LogInformation("PriceBot Worker başladı. IncomingRoot={IncomingRoot} BotSendUrl={BotSendUrl} OcrParalel={OcrParallelism} OcrCacheCapacity={OcrCacheCapacity} OcrRecycleHours={OcrRecycleHours} OcrRecycleMemoryMb={OcrRecycleMemoryMb} SendReportToCustomer={SendReportToCustomer} LearnedBrandAliasCount={LearnedBrandAliasCount}",
+            IncomingRoot, BotSendUrl, ocrParallelism, ocrCacheCapacity, ocrRecycleHours, ocrRecycleMemoryMb, sendReportToCustomer, aliasStore.Aliases.Count);
 
         // 2026-08-09: Önceden bu kontrol SADECE dış while döngüsünün başında çalışıyordu — ama
         // aşağıdaki `foreach (var folder in readyFolders)` birikmiş çok sayıda klasörü TEK bir turda
@@ -382,7 +405,7 @@ public class Worker : BackgroundService
                         _logger.LogWarning("USD kuru bulunamadı, klasör {Folder} bu turda atlandı, bir sonraki turda tekrar denenecek.", folder);
                         continue;
                     }
-                    _logger.LogInformation("Kur: 1 USD = {Rate} TRY (kur tarihi: {RateDate:yyyy-MM-dd}, AllExchangeRates tip 6)", rate.Value.Rate, rate.Value.RateDate);
+                    _logger.LogInformation("Kur: 1 USD = {Rate} TRY (kur tarihi: {RateDate:yyyy-MM-dd}, AllExchangeRates tip 2)", rate.Value.Rate, rate.Value.RateDate);
 
                     var brandLoad = await brandProvider.GetBrandMultipliersAsync();
                     var brandList = brandLoad.Brands;
@@ -499,7 +522,7 @@ public class Worker : BackgroundService
                     // vermezse gönderene WhatsApp'tan marka sorulur ve klasör, bot cevabı
                     // marka_cevap.txt olarak yazana kadar bekletilir (islendi.txt yazılmaz).
                     var brandResolution = await ResolveFolderBrandAsync(
-                        http, folder, senderPhone, excelFile, Path.GetFileName(excelFile), ocrPool, scans, brandList, excludedBrands, geminiClassifier, stoppingToken);
+                        http, folder, senderPhone, excelFile, Path.GetFileName(excelFile), ocrPool, scans, brandList, excludedBrands, brandClassifiers, aliasStore, stoppingToken);
                     if (brandResolution is null) continue;
                     var (brand, brandSource) = brandResolution.Value;
                     _logger.LogInformation("Klasör markası: {Brand} (NetCarpan={Carpan}, kaynak: {Source})",
@@ -887,14 +910,41 @@ public class Worker : BackgroundService
         _logger.LogInformation("PriceBot Worker durduruluyor.");
     }
 
+    /// <summary>Birden fazla token → güven sözlüğünü tek bir sözlükte birleştirir (aynı kelime
+    /// birden fazla kaynakta geçerse en yüksek güven kazanır). ResolveFolderBrandAsync'in
+    /// öğrenilmiş-alias eşleştirmesi ve öğrenme adımı, OCR/dosya-adı/letterhead token'larını
+    /// bu şekilde birleştirir — kaynak sözlükler (özellikle paylaşılan `unionTokens`) DEĞİŞTİRİLMEZ,
+    /// her çağrı yeni bir sözlük döner.</summary>
+    private static Dictionary<string, float> MergeTokenSources(params IReadOnlyDictionary<string, float>[] sources)
+    {
+        var merged = new Dictionary<string, float>(StringComparer.Ordinal);
+        foreach (var source in sources)
+            foreach (var (word, conf) in source)
+                if (!merged.TryGetValue(word, out var best) || conf > best)
+                    merged[word] = conf;
+        return merged;
+    }
+
     /// <summary>Klasörün markasını çözer. Öncelik sırası:
     /// 1) Bot'un yazdığı marka_cevap.txt (kullanıcının WhatsApp cevabı) — eşleşirse marka budur;
     ///    eşleşmezse cevap marka_cevap_red_*.txt olarak arşivlenir ve önerilerle tekrar sorulur.
     /// 2) Tüm görsellerin OCR token birleşimi (klasör tek marka olduğu için herhangi bir
     ///    görselden okunabilen logo yeterlidir).
-    /// 3) İkisi de yoksa gönderene WhatsApp'tan marka sorulur; soru BAŞARIYLA gönderilirse
+    /// 3) Excel dosya adı, 4) Excel letterhead, 5) daha önce ÖĞRENİLMİŞ alias'lar (bkz. altta),
+    ///    6) çoklu-sağlayıcı görü tespiti zinciri (Gemini x2 -> Groq -> Claude, bkz.
+    ///    IBrandClassifier.cs — 2026-08-24'ten önce SADECE tek bir Gemini örneğiydi).
+    /// 7) Hiçbiri bulamazsa gönderene WhatsApp'tan marka sorulur; soru BAŞARIYLA gönderilirse
     ///    marka_sorusu.txt işaretçisi yazılır ve klasör cevaba kadar taramalarda atlanır.
-    /// null dönerse klasör bu turda işlenmez (soru soruldu / cevap bekleniyor / soru gönderilemedi).</summary>
+    /// null dönerse klasör bu turda işlenmez (soru soruldu / cevap bekleniyor / soru gönderilemedi).
+    ///
+    /// "Kendini eğitme" (2026-08-21, kullanıcı isteği): marka GERÇEKTEN teyit edildiğinde
+    /// (1'deki müşteri cevabı veya 6'daki görü tespiti — OCR'ın resmi ad eşleşmesinden (2/3/4)
+    /// ÖĞRENİLMEZ, zaten kendisi güvenilir kabul edilir) o klasördeki delil token'larından (OCR +
+    /// dosya adı + letterhead) resmi adla eşleşmeyen ama artık doğrulanmış kelimeler
+    /// LearnedBrandAliasStore'a kalıcı hale getirilir — bkz. LearnFromConfirmedBrand yerel
+    /// fonksiyonu. Sonraki bir klasörde (aynı dekoratif logo fontu, aynı dosya-adı alışkanlığı —
+    /// hatta BAŞKA bir müşteriden gelse bile) bu alias'lar adım 5'te, görü tespitine/soruya
+    /// düşmeden ÖNCE denenir.</summary>
     private async Task<(BrandMultiplier Brand, string Source)?> ResolveFolderBrandAsync(
         HttpClient http,
         string folder,
@@ -905,11 +955,33 @@ public class Worker : BackgroundService
         List<(string File, ScanResult Scan)> scans,
         List<BrandMultiplier> brandList,
         List<BrandMultiplier> excludedBrands,
-        GeminiVisionClassifier geminiClassifier,
+        List<(string Source, IBrandClassifier Classifier)> brandClassifiers,
+        LearnedBrandAliasStore aliasStore,
         CancellationToken ct)
     {
         var questionPath = Path.Combine(folder, "marka_sorusu.txt");
         var answerPath = Path.Combine(folder, "marka_cevap.txt");
+
+        var unionTokens = new Dictionary<string, float>();
+        void MergeTokens(IReadOnlyDictionary<string, float> tokens)
+        {
+            foreach (var (word, conf) in tokens)
+                if (!unionTokens.TryGetValue(word, out var best) || conf > best)
+                    unionTokens[word] = conf;
+        }
+        foreach (var (_, scan) in scans) MergeTokens(scan.Tokens);
+
+        // bkz. yukarıdaki "Kendini eğitme" notu. excelName/excelPath'ten TEKRAR token çıkarımı
+        // (fileName/letterhead eşleştirme aşamalarıyla aynı fonksiyonlar) ucuzdur; letterhead
+        // Excel'i açar ama bu SADECE marka gerçekten teyit edildiğinde (nadir — soru başına bir
+        // kez) çağrılır.
+        void LearnFromConfirmedBrand(BrandMultiplier confirmedBrand, string source)
+        {
+            var evidence = MergeTokenSources(unionTokens,
+                ExcelPriceReader.ExtractFileNameTokens(excelName),
+                ExcelPriceReader.ExtractLetterheadTokens(excelPath));
+            aliasStore.Learn(confirmedBrand, evidence, brandList, source, folder);
+        }
 
         if (File.Exists(answerPath))
         {
@@ -918,6 +990,7 @@ public class Worker : BackgroundService
             if (outcome.Brand is not null)
             {
                 var note = outcome.Approximate ? ", yazım farkıyla yaklaşık eşleşme" : "";
+                LearnFromConfirmedBrand(outcome.Brand, "müşteri cevabı");
                 return (outcome.Brand, $"kullanıcı cevabı ('{answerText}'{note})");
             }
 
@@ -953,15 +1026,6 @@ public class Worker : BackgroundService
             await SendBrandQuestionAsync(http, folder, senderPhone, questionPath, retryQuestion, retryOptions, ct);
             return null;
         }
-
-        var unionTokens = new Dictionary<string, float>();
-        void MergeTokens(IReadOnlyDictionary<string, float> tokens)
-        {
-            foreach (var (word, conf) in tokens)
-                if (!unionTokens.TryGetValue(word, out var best) || conf > best)
-                    unionTokens[word] = conf;
-        }
-        foreach (var (_, scan) in scans) MergeTokens(scan.Tokens);
 
         var ocrOutcome = BrandMatcher.MatchFromOcrTokens(unionTokens, brandList);
 
@@ -1012,18 +1076,50 @@ public class Worker : BackgroundService
             return (ocrOutcome.Brand, $"görsel OCR (kanıt: {string.Join(" ", ocrOutcome.MatchedWords)}{approxNote})");
         }
 
-        // Excel letterhead marka taraması (2026-08-11, gerçek vaka: PRETTY LİFE): OCR (kod
-        // taraması + renk kurtarma) markayı bulamadı/çelişkili buldu. Gemini'ye (ağ çağrısı,
-        // gecikme+kota) başvurmadan önce, bazı üretici Excel'lerinin kod/fiyat başlığından
-        // ÖNCEKİ satırlarında duran firma adı/logo yanı metnine ("PRETTY LİFE TEKSTİL İNŞ...")
-        // bakılır — ücretsiz ve deterministik. Gerçek vakada hiçbir ürün görselinde marka adı
-        // basılı değildi (sadece jenerik tasarım ibareleri vardı), ama Excel'in üst bilgisinde
-        // gerçek metin olarak duruyordu. ExtractLetterheadTokens bilinçli olarak SADECE bu alanı
-        // tarar (ürün açıklama sütunları hariç — ALİSA/karışık-katalog riskiyle aynı sınıftaki
-        // yanlış eşleşmeyi Excel tarafında tekrarlamamak için, bkz. CLAUDE.md "KIDSWEAR" notu);
-        // aynı BrandMatcher kelime-eşleştirme + jenerik-kelime filtresi + çelişkili-NetCarpan
-        // güvenlik ağı kullanılır. Bulunamazsa/çelişkiliyse davranış hiç değişmez.
-        var letterheadOutcome = BrandMatcher.MatchFromOcrTokens(ExcelPriceReader.ExtractLetterheadTokens(excelPath), brandList);
+        // Excel dosya adı marka taraması (2026-08-21, gerçek vaka: JOJOMİNİ): OCR (kod taraması
+        // + renk kurtarma) markayı bulamadı. Herhangi bir dosyayı açmadan önce (letterhead/
+        // Gemini'den bile daha ucuz — sıfır I/O, sıfır ağ çağrısı) gönderenin/bot'un zaten
+        // elimizde olan Excel dosya adına bakılır: gönderenler fiyat listesini çoğunlukla
+        // markanın adını içeren bir dosya adıyla gönderiyor ("Jojomini fiyat.xlsx"). Gerçek
+        // vakada ürün görsellerindeki logo ("jojomini") tek kelime, aşırı dekoratif kıvrık bir
+        // fontla basılıydı ve OCR hiç okuyamadı — üstelik Nebim'deki marka adı da "JOJO MİNİ"
+        // (araya boşluklu) olduğu için OCR görseli doğru okumuş olsaydı bile kelime-bazlı
+        // eşleşme "JOJO" ve "MİNİ" ayrı token olarak GEREKTİRİRDİ (MİNİ zaten jenerik kelime,
+        // tek başına kanıt sayılmaz); dosya adındaki bitişik "Jojomini" ise BrandMatcher'ın adın
+        // boşluksuz hâlini TEK token olarak deneyen yedek kuralıyla ("JOJOMİNİ") zaten eşleşiyor.
+        // ExtractFileNameTokens dosya adını (bot'un eklediği zaman damgası/hash önekiyle birlikte)
+        // TEK bir yüksek-güvenli (100) token olarak verir; BrandMatcher kendi içinde kelimelere
+        // ayırıp aynı kelime-bazlı-tam-eşleşme + jenerik-kelime filtresi + çelişkili-NetCarpan
+        // güvenlik ağını uygular — yanlışlıkla alakasız bir markayla eşleşme riski letterhead ile
+        // aynı seviyede düşük. Bulunamazsa/çelişkiliyse davranış hiç değişmez.
+        var fileNameTokens = ExcelPriceReader.ExtractFileNameTokens(excelName);
+        var fileNameOutcome = BrandMatcher.MatchFromOcrTokens(fileNameTokens, brandList);
+        if (fileNameOutcome.Brand is not null)
+        {
+            var approxNote = fileNameOutcome.Approximate ? ", yaklaşık eşleşme" : "";
+            _logger.LogInformation("Klasör {Folder}: Excel dosya adında marka bulundu: {Brand} (kanıt: {Evidence})",
+                folder, fileNameOutcome.Brand.FullName, string.Join(" ", fileNameOutcome.MatchedWords));
+            return (fileNameOutcome.Brand, $"Excel dosya adı (kanıt: {string.Join(" ", fileNameOutcome.MatchedWords)}{approxNote})");
+        }
+        if (fileNameOutcome.AmbiguousNames.Count > 0)
+        {
+            _logger.LogInformation("Klasör {Folder}: Excel dosya adında çelişkili (farklı çarpanlı) marka adayları bulundu ({Brands}), atlanıyor.",
+                folder, string.Join(", ", fileNameOutcome.AmbiguousNames));
+        }
+
+        // Excel letterhead marka taraması (2026-08-11, gerçek vaka: PRETTY LİFE): dosya adı da
+        // markayı vermedi. Gemini'ye (ağ çağrısı, gecikme+kota) başvurmadan önce, bazı üretici
+        // Excel'lerinin kod/fiyat başlığından ÖNCEKİ satırlarında duran firma adı/logo yanı
+        // metnine ("PRETTY LİFE TEKSTİL İNŞ...") bakılır — ücretsiz ve deterministik. Gerçek
+        // vakada hiçbir ürün görselinde marka adı basılı değildi (sadece jenerik tasarım
+        // ibareleri vardı), ama Excel'in üst bilgisinde gerçek metin olarak duruyordu.
+        // ExtractLetterheadTokens bilinçli olarak SADECE bu alanı tarar (ürün açıklama sütunları
+        // hariç — ALİSA/karışık-katalog riskiyle aynı sınıftaki yanlış eşleşmeyi Excel tarafında
+        // tekrarlamamak için, bkz. CLAUDE.md "KIDSWEAR" notu); aynı BrandMatcher kelime-eşleştirme
+        // + jenerik-kelime filtresi + çelişkili-NetCarpan güvenlik ağı kullanılır. Bulunamazsa/
+        // çelişkiliyse davranış hiç değişmez.
+        var letterheadTokens = ExcelPriceReader.ExtractLetterheadTokens(excelPath);
+        var letterheadOutcome = BrandMatcher.MatchFromOcrTokens(letterheadTokens, brandList);
         if (letterheadOutcome.Brand is not null)
         {
             var approxNote = letterheadOutcome.Approximate ? ", yaklaşık eşleşme" : "";
@@ -1037,40 +1133,83 @@ public class Worker : BackgroundService
                 folder, string.Join(", ", letterheadOutcome.AmbiguousNames));
         }
 
+        // Öğrenilmiş alias taraması (2026-08-21, kullanıcı isteği: "kendini eğitebiliyor
+        // olmalı" — bkz. yukarıdaki metod başı yorumu). Resmi Nebim adıyla eşleşen hiçbir
+        // kaynak (OCR/dosya adı/letterhead) markayı bulamadı; Gemini'ye (ağ çağrısı, kota)
+        // başvurmadan önce daha önce AYNI türde bir delilin (ör. aynı dekoratif logo fontunun
+        // OCR okuması, aynı üreticinin dosya-adı alışkanlığı) bir müşteri cevabıyla ya da
+        // Gemini görü tespitiyle teyit edilip kaydedilmiş olup olmadığına bakılır — ücretsiz +
+        // yerel, tıpkı dosya adı/letterhead taraması gibi. Bulunamazsa/çelişkiliyse davranış
+        // hiç değişmez (Gemini'ye, sonra WhatsApp sorusuna düşülür).
+        var learnedOutcome = BrandMatcher.MatchFromLearnedAliases(
+            MergeTokenSources(unionTokens, fileNameTokens, letterheadTokens), aliasStore.Aliases, brandList);
+        if (learnedOutcome.Brand is not null)
+        {
+            _logger.LogInformation("Klasör {Folder}: öğrenilmiş alias ile marka bulundu: {Brand} (kanıt: {Evidence})",
+                folder, learnedOutcome.Brand.FullName, string.Join(" ", learnedOutcome.MatchedWords));
+            return (learnedOutcome.Brand, $"öğrenilmiş alias (kanıt: {string.Join(" ", learnedOutcome.MatchedWords)})");
+        }
+        if (learnedOutcome.AmbiguousNames.Count > 0)
+        {
+            _logger.LogInformation("Klasör {Folder}: öğrenilmiş alias'larda çelişkili (farklı çarpanlı) marka adayları bulundu ({Brands}), atlanıyor.",
+                folder, string.Join(", ", learnedOutcome.AmbiguousNames));
+        }
+
         // Son çare: OCR (kod taraması + renk-duyarlı kurtarma) ve Excel letterhead taraması
         // markayı ya HİÇ bulamadı ya da ÇELİŞKİLİ biçimde birden fazla (farklı çarpanlı) marka
-        // buldu — WhatsApp'a sormadan önce Google Gemini'nin görü modeline (2026-08-10, ücretsiz
-        // katman) kapalı marka listesiyle son bir şans verilir — bkz. GeminiVisionClassifier.cs
-        // dosya başı yorumu (resim-logo/aşırı dekoratif font vakası, hiçbir OCR'ın çözemediği
-        // durum). GeminiApiKey boşsa ClassifyBrandAsync hiçbir ağ isteği atmadan null döner,
-        // davranış hiç değişmez.
+        // buldu — WhatsApp'a sormadan önce görü tabanlı çoklu-sağlayıcı zincire (2026-08-10,
+        // Gemini ile başladı; 2026-08-24'te Gemini x2 -> Groq -> Claude'a genişletildi, bkz.
+        // IBrandClassifier.cs dosya başı yorumu) kapalı marka listesiyle son bir şans verilir —
+        // bkz. GeminiVisionClassifier.cs dosya başı yorumu (resim-logo/aşırı dekoratif font
+        // vakası, hiçbir OCR'ın çözemediği durum). apiKey boş bırakılan sağlayıcılar hiçbir ağ
+        // isteği atmadan (null,null,false) döner, davranış hiç değişmez.
         //
         // 2026-08-11 GENİŞLETME (kullanıcı isteği): eskiden bu adım SADECE ocrOutcome.
         // AmbiguousNames boşken ("hiç bulamadım") çalışırdı; "çelişkili birden fazla marka"
         // durumu bilinçli olarak atlanıp direkt WhatsApp sorusuna düşülürdü (risk almama
-        // tercihiydi, ilk sürümde kapsam dar tutulmuştu). Artık HER İKİ durumda da Gemini önce
-        // denenir: gerçek bir vaka (bkz. CLAUDE.md "KIDSWEAR" notu) çelişkili eşleşmelerin çoğu
-        // zaman OCR gürültüsünden (ör. iki markanın ortak jenerik tagline'ının üçüncü, alakasız
-        // bir markayla tesadüfen çakışması) kaynaklandığını gösterdi — görü modeli harf
+        // tercihiydi, ilk sürümde kapsam dar tutulmuştu). Artık HER İKİ durumda da görü tespiti
+        // önce denenir: gerçek bir vaka (bkz. CLAUDE.md "KIDSWEAR" notu) çelişkili eşleşmelerin
+        // çoğu zaman OCR gürültüsünden (ör. iki markanın ortak jenerik tagline'ının üçüncü,
+        // alakasız bir markayla tesadüfen çakışması) kaynaklandığını gösterdi — görü modeli harf
         // okumadığı için bu tür OCR-özgü tuzaklara düşmüyor, asıl görsele bakıp doğrudan karar
-        // verebiliyor. Gemini de bulamazsa (ya da kapalıysa) davranış aynı: WhatsApp sorusu.
+        // verebiliyor. Hiçbir sağlayıcı bulamazsa (ya da hepsi kapalıysa) davranış aynı: WhatsApp
+        // sorusu.
+        //
+        // ÇOKLU-SAĞLAYICI ZİNCİRİ + OCR İPUCU ENJEKSİYONU (2026-08-24, kullanıcı isteği:
+        // "markaları daha iyi tespit edebilmek... farklı fontlarla yazılmış marka isimlerini
+        // daha iyi okuyabilmek"): brandClassifiers SIRAYLA denenir (Gemini birincil key -> Gemini
+        // ikincil key -> Groq -> Claude — codeClassifiers ile AYNI sıra/gerekçe, ücretsiz+ucuz
+        // önce); bir sağlayıcı marka BULURSA hemen durulur, bulamazsa (hata YA DA gerçek
+        // "BULUNAMADI" farketmez) SIRADAKİ denenir — bkz. IBrandClassifier.cs dosya başı yorumu
+        // ("neden hata-fark etmeksizin sıradaki denenir" gerekçesi orada). ocrHint, OCR'ın (kod
+        // taraması + dosya adı + letterhead birleşimi) markayla eşleşmeyen ama ayırt edici ham
+        // kelimelerini (ör. "JOJOMINI") vision modeline EK BAĞLAM olarak verir — halüsinasyon
+        // riskini artırmaz (model hâlâ SADECE kapalı listeden enum seçimine zorlanıyor).
         var visionFiles = scans.Take(4).Select(s => s.File).ToList();
-        var visionResult = await geminiClassifier.ClassifyBrandAsync(visionFiles, brandList, ct);
-        if (visionResult is not null)
+        var ocrHintWords = BrandMatcher.ExtractDistinctiveHintWords(MergeTokenSources(unionTokens, fileNameTokens, letterheadTokens));
+        var ocrHint = ocrHintWords.Count > 0 ? string.Join(", ", ocrHintWords) : null;
+        foreach (var (source, classifier) in brandClassifiers)
         {
-            _logger.LogInformation("Klasör {Folder}: Gemini görü modeli markayı buldu: {Brand}",
-                folder, visionResult.Value.Brand.FullName);
-            return (visionResult.Value.Brand, $"Gemini görü modeli (etiket: '{visionResult.Value.RawLabel}')");
+            var visionResult = await classifier.ClassifyBrandAsync(visionFiles, brandList, ocrHint, ct);
+            if (visionResult.Brand is not null)
+            {
+                _logger.LogInformation("Klasör {Folder}: {Source} markayı buldu: {Brand}",
+                    folder, source, visionResult.Brand.FullName);
+                LearnFromConfirmedBrand(visionResult.Brand, source);
+                return (visionResult.Brand, $"{source} (etiket: '{visionResult.RawLabel}')");
+            }
+            if (visionResult.ApiFailed)
+                _logger.LogInformation("Klasör {Folder}: {Source} API hatasıyla başarısız oldu, sıradaki sağlayıcı deneniyor.", folder, source);
         }
 
         if (ocrOutcome.AmbiguousNames.Count > 0)
         {
-            _logger.LogWarning("Klasör {Folder}: OCR birden fazla çelişkili (farklı çarpanlı) marka buldu ({Brands}), Gemini de çözemedi, kullanıcıya sorulacak.",
+            _logger.LogWarning("Klasör {Folder}: OCR birden fazla çelişkili (farklı çarpanlı) marka buldu ({Brands}), görü tespiti zinciri de çözemedi, kullanıcıya sorulacak.",
                 folder, string.Join(", ", ocrOutcome.AmbiguousNames));
         }
         else
         {
-            _logger.LogInformation("Klasör {Folder}: Gemini görü modeli de marka bulamadı (veya kapalı), kullanıcıya sorulacak.", folder);
+            _logger.LogInformation("Klasör {Folder}: hiçbir görü tespiti sağlayıcısı marka bulamadı (veya hepsi kapalı), kullanıcıya sorulacak.", folder);
         }
 
         // Soru metnine Excel adı eklenir: çoklu marka gönderimi gruplara bölündüğünde aynı numaraya
@@ -1515,7 +1654,7 @@ public class Worker : BackgroundService
         sb.AppendLine();
 
         sb.AppendLine("--- Kur ---");
-        sb.AppendLine($"1 USD = {rateValue} TRY (kur tarihi: {rateDate:yyyy-MM-dd}, kaynak: Nebim AllExchangeRates, tip 6)");
+        sb.AppendLine($"1 USD = {rateValue} TRY (kur tarihi: {rateDate:yyyy-MM-dd}, kaynak: Nebim AllExchangeRates, tip 2)");
         sb.AppendLine();
 
         sb.AppendLine("--- Marka ---");

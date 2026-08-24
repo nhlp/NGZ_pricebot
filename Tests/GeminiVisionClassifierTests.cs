@@ -441,3 +441,26 @@ public class GeminiVisionClassifierExtractLabelTests
         Assert.Null(blockReason);
     }
 }
+
+/// <summary>BuildBrandUserPrompt, OCR ipucu enjeksiyonunu (2026-08-24, "markaları daha iyi tespit
+/// edebilmek") saf/testable şekilde uygular — GroqVisionClassifierLabelResolver/
+/// AnthropicVisionClassifierLabelResolver'daki AYNI desen.</summary>
+public class GeminiVisionClassifierBuildBrandUserPromptTests
+{
+    [Fact]
+    public void IpucuYoksaPromptDegismez()
+    {
+        Assert.Equal("temel prompt", GeminiVisionClassifier.BuildBrandUserPrompt("temel prompt", null));
+        Assert.Equal("temel prompt", GeminiVisionClassifier.BuildBrandUserPrompt("temel prompt", ""));
+        Assert.Equal("temel prompt", GeminiVisionClassifier.BuildBrandUserPrompt("temel prompt", "   "));
+    }
+
+    [Fact]
+    public void IpucuVarsaEkBaglamOlarakEklenir()
+    {
+        var result = GeminiVisionClassifier.BuildBrandUserPrompt("temel prompt", "JOJOMINI, FLAMINDO");
+
+        Assert.StartsWith("temel prompt", result);
+        Assert.Contains("JOJOMINI, FLAMINDO", result);
+    }
+}

@@ -48,6 +48,20 @@ public sealed partial class GeminiVisionClassifier
     internal static BrandMultiplier? ResolveLabelToBrand(string label, IReadOnlyList<BrandMultiplier> candidates) =>
         candidates.FirstOrDefault(b => string.Equals(b.FullName, label, StringComparison.Ordinal));
 
+    /// <summary>OCR'ın (kod taraması + dosya adı + letterhead) markayla eşleşmeyen ama ayırt
+    /// edici ham kelimelerini (bkz. BrandMatcher.ExtractDistinctiveHintWords) marka sorusuna
+    /// EK BAĞLAM olarak ekler (2026-08-24, "OCR İPUCU ENJEKSİYONU" — bkz. IBrandClassifier.cs
+    /// dosya başı yorumu). <paramref name="ocrHint"/> null/boşsa prompt DEĞİŞMEZ — davranış
+    /// aynı kalır. Pure/testable: SkiaSharp/HttpClient'a bağımlı değil, bu yüzden
+    /// GeminiVisionClassifier.cs (network) yerine burada.</summary>
+    internal static string BuildBrandUserPrompt(string baseBrandPrompt, string? ocrHint) =>
+        string.IsNullOrWhiteSpace(ocrHint)
+            ? baseBrandPrompt
+            : $"{baseBrandPrompt} EK İPUCU (kesin değil — OCR'ın bulanık/yaklaşık okuması): bu " +
+              $"görsellerde şuna benzer harfler görüldü: {ocrHint}. Bu ipucu markayı listeden " +
+              "seçerken yardımcı olabilir ama listedeki isimle TAM örtüşmüyorsa yine de görsele " +
+              "bakarak en uygun markayı seç; hiçbiri uymuyorsa 'BULUNAMADI' de.";
+
     /// <summary>SADECE HTTP 400/404 kalıcı (model'e özgü) konfigürasyon hatası sayılır — bkz.
     /// dosya başı "YEDEK MODEL ZİNCİRİ" notu (GeminiVisionClassifier.cs). 5xx/timeout gibi
     /// geçici hatalarda false. 429 (kota) ARTIK burada değil — bkz. <see cref="IsQuotaError"/>,

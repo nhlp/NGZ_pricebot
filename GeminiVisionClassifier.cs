@@ -92,8 +92,11 @@ namespace PriceBotPipeline;
 ///
 /// <see cref="IProductCodeClassifier"/> UYGULAR (2026-08-13): Worker.cs'in çoklu-sağlayıcı
 /// zincirinde (bkz. o arayüzün dosya başı yorumu) Gemini birincil/ikincil key olarak İKİ AYRI
-/// örnek (aynı sınıf, farklı apiKey) bu arayüz üzerinden aynı döngüyle çağrılıyor.</summary>
-public sealed partial class GeminiVisionClassifier : IProductCodeClassifier
+/// örnek (aynı sınıf, farklı apiKey) bu arayüz üzerinden aynı döngüyle çağrılıyor.
+///
+/// <see cref="IBrandClassifier"/> DA UYGULAR (2026-08-24): marka tespiti de artık AYNI iki-key
+/// zincire (+ Groq + Claude) dahil — bkz. o arayüzün dosya başı yorumu.</summary>
+public sealed partial class GeminiVisionClassifier : IProductCodeClassifier, IBrandClassifier
 {
     private const string ApiBase = "https://generativelanguage.googleapis.com/v1beta/models";
     private const int MaxImages = 4;
@@ -162,26 +165,33 @@ public sealed partial class GeminiVisionClassifier : IProductCodeClassifier
     /// <summary>OCR'ın hiç bulamadığı bir klasör için son çare marka tespiti. Görseller TEK TEK,
     /// sıralı denenir (bkz. dosya başı "KOTA KORUMA" notu) — ilk başarılı sonuçta durulur.
     /// KALICI hata alınırsa (kota, config, vb. — bkz. <see cref="LabelResult.IsTransientFailure"/>)
-    /// HEMEN durulur, kalan görseller denenmez (aynı duvara çarpar, boşuna harcanır); GEÇİCİ hata
-    /// (503/timeout/ağ — 2026-08-10, gerçek vaka: bir "model şu anda yoğun" 503'ü tüm klasörün
-    /// kalan görsellerini gereksiz yere atlatmıştı) alınırsa sıradaki görsel yine denenir;
-    /// "BULUNAMADI" alınırsa da sıradaki görsel denenir. Sonuçta hiçbiri bulamazsa null döner —
-    /// çağıran taraf bunu WhatsApp sorusuna düşmesi gerektiği şeklinde okur.</summary>
-    public async Task<(BrandMultiplier Brand, string RawLabel)?> ClassifyBrandAsync(
+    /// HEMEN durulur, kalan görseller denenmez (aynı duvara çarpar, boşuna harcanır), <c>ApiFailed
+    /// =true</c> döner (Worker.cs'in çoklu-sağlayıcı zincirinde SIRADAKİ sağlayıcıya geçme sinyali
+    /// — bkz. IBrandClassifier.cs); GEÇİCİ hata (503/timeout/ağ — 2026-08-10, gerçek vaka: bir
+    /// "model şu anda yoğun" 503'ü tüm klasörün kalan görsellerini gereksiz yere atlatmıştı)
+    /// alınırsa sıradaki görsel yine denenir; "BULUNAMADI" alınırsa da sıradaki görsel denenir.
+    /// Sonuçta hiçbiri bulamazsa <c>(null, null, false)</c> döner — çağıran taraf bunu sıradaki
+    /// sağlayıcıya (varsa) ya da WhatsApp sorusuna düşmesi gerektiği şeklinde okur.
+    ///
+    /// <paramref name="ocrHint"/> (2026-08-24, "OCR İPUCU ENJEKSİYONU" — bkz. IBrandClassifier.cs
+    /// dosya başı yorumu): null/boşsa prompt hiç değişmez.</summary>
+    public async Task<(BrandMultiplier? Brand, string? RawLabel, bool ApiFailed)> ClassifyBrandAsync(
         IReadOnlyList<string> imagePaths,
         IReadOnlyList<BrandMultiplier> candidates,
+        string? ocrHint,
         CancellationToken ct)
     {
         if (_apiKey.Length == 0 || imagePaths.Count == 0 || candidates.Count == 0)
-            return null;
+            return (null, null, false);
 
         var candidateNames = BuildDistinctCandidateNames(candidates);
-        if (candidateNames.Count == 0) return null;
+        if (candidateNames.Count == 0) return (null, null, false);
 
+        var userPrompt = BuildBrandUserPrompt(BrandUserPrompt, ocrHint);
         foreach (var path in imagePaths.Take(MaxImages))
         {
             _logger.LogInformation("Gemini görü tespiti: marka için soruluyor -> {File}", Path.GetFileName(path));
-            var result = await ClassifyLabelAsync([path], candidateNames, BrandUserPrompt, BrandSystemPrompt, ct);
+            var result = await ClassifyLabelAsync([path], candidateNames, userPrompt, BrandSystemPrompt, ct);
             if (result.Label is null)
             {
                 if (result.IsTransientFailure)
@@ -189,7 +199,7 @@ public sealed partial class GeminiVisionClassifier : IProductCodeClassifier
                     _logger.LogInformation("Gemini görü tespiti: '{File}' için geçici bir hata alındı, sıradaki görsel deneniyor.", Path.GetFileName(path));
                     continue; // geçici hata (503/timeout/ağ) — sıradaki görseli dene
                 }
-                return null; // kalıcı hata (kota/config) — kalan görselleri deneme
+                return (null, null, true); // kalıcı hata (kota/config) — kalan görselleri deneme
             }
             if (result.Label == NotFoundLabel)
             {
@@ -198,14 +208,14 @@ public sealed partial class GeminiVisionClassifier : IProductCodeClassifier
             }
 
             var brand = ResolveLabelToBrand(result.Label, candidates);
-            if (brand is not null) return (brand, result.Label);
+            if (brand is not null) return (brand, result.Label, false);
 
             // Teorik olarak olmamalı (enum zorlaması candidateNames dışında bir değere izin
             // vermiyor) — yine de savunmacı: beklenmeyen etiketle sıradaki görseli dene.
             _logger.LogWarning("Gemini görü marka tespiti: dönen etiket ('{Label}') aday listesiyle eşleşmedi.", result.Label);
         }
 
-        return null;
+        return (null, null, false);
     }
 
     /// <summary>Geçici bir Gemini hatasından sonra AYNI görsel için tek seferlik tekrar deneme

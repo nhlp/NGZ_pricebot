@@ -59,7 +59,7 @@ public class AnthropicVisionClassifierBuildRequestTests
     {
         var request = AnthropicVisionClassifier.BuildRequest(
             "claude-haiku-4-5-20251001", 512, "sistem", "kullanıcı",
-            "AAAA", "image/jpeg", ["1270", "1282", "1291"]);
+            "AAAA", "image/jpeg", ["1270", "1282", "1291"], "report_code", "kod bildir");
 
         var enumValues = request.Tools[0].InputSchema.Properties["value"].Enum;
         Assert.Equal(["1270", "1282", "1291", "BULUNAMADI"], enumValues);
@@ -69,17 +69,31 @@ public class AnthropicVisionClassifierBuildRequestTests
     public void ToolChoiceZorunluAraciIsaretEder()
     {
         var request = AnthropicVisionClassifier.BuildRequest(
-            "model", 512, "s", "u", "AAAA", "image/jpeg", ["1291"]);
+            "model", 512, "s", "u", "AAAA", "image/jpeg", ["1291"], "report_code", "kod bildir");
 
         Assert.Equal("tool", request.ToolChoice.Type);
         Assert.Equal(request.Tools[0].Name, request.ToolChoice.Name);
+    }
+
+    /// <summary>2026-08-24: BuildRequest artık toolName/toolDescription parametre alıyor (kod ve
+    /// marka tespiti AYRI araç adları kullanıyor) — GroqVisionClassifierBuildRequestTests'teki
+    /// AYNI kilit.</summary>
+    [Fact]
+    public void OzelAracAdiToolsVeToolChoiceYaYansir()
+    {
+        var request = AnthropicVisionClassifier.BuildRequest(
+            "model", 512, "s", "u", "AAAA", "image/jpeg", ["MARKA"], "report_brand", "marka bildir");
+
+        Assert.Equal("report_brand", request.Tools[0].Name);
+        Assert.Equal("marka bildir", request.Tools[0].Description);
+        Assert.Equal("report_brand", request.ToolChoice.Name);
     }
 
     [Fact]
     public void GorselVeMetinDogruSiraylaMesajaYerlesir()
     {
         var request = AnthropicVisionClassifier.BuildRequest(
-            "model", 512, "sistem", "kullanıcı metni", "BASE64VERI", "image/jpeg", ["1291"]);
+            "model", 512, "sistem", "kullanıcı metni", "BASE64VERI", "image/jpeg", ["1291"], "report_code", "kod bildir");
 
         Assert.Equal("sistem", request.System);
         var content = request.Messages[0].Content;
@@ -97,7 +111,7 @@ public class AnthropicVisionClassifierBuildRequestTests
         // BuildRequest'in çıktısı, ClassifyCodeAsync'in gerçekten Claude'a gönderdiği
         // JsonSerializerContext (AnthropicJsonContext) ile serileştirilebilmeli.
         var request = AnthropicVisionClassifier.BuildRequest(
-            "claude-haiku-4-5-20251001", 512, "s", "u", "AAAA", "image/jpeg", ["1291"]);
+            "claude-haiku-4-5-20251001", 512, "s", "u", "AAAA", "image/jpeg", ["1291"], "report_code", "kod bildir");
 
         var json = JsonSerializer.Serialize(request, AnthropicJsonContext.Default.AnthropicRequest);
 
@@ -121,7 +135,7 @@ public class AnthropicVisionClassifierBuildRequestTests
     public void ImageBlogundaTextAlaniHicSerilestirilmez()
     {
         var request = AnthropicVisionClassifier.BuildRequest(
-            "model", 512, "s", "u", "AAAA", "image/jpeg", ["1291"]);
+            "model", 512, "s", "u", "AAAA", "image/jpeg", ["1291"], "report_code", "kod bildir");
 
         var json = JsonSerializer.Serialize(request, AnthropicJsonContext.Default.AnthropicRequest);
         using var doc = JsonDocument.Parse(json);
@@ -136,7 +150,7 @@ public class AnthropicVisionClassifierBuildRequestTests
     public void TextBlogundaSourceAlaniHicSerilestirilmez()
     {
         var request = AnthropicVisionClassifier.BuildRequest(
-            "model", 512, "s", "u", "AAAA", "image/jpeg", ["1291"]);
+            "model", 512, "s", "u", "AAAA", "image/jpeg", ["1291"], "report_code", "kod bildir");
 
         var json = JsonSerializer.Serialize(request, AnthropicJsonContext.Default.AnthropicRequest);
         using var doc = JsonDocument.Parse(json);
@@ -166,7 +180,7 @@ public class AnthropicVisionClassifierExtractLabelTests
     [Fact]
     public void BasariliYanittaEtiketCikarilir()
     {
-        var label = AnthropicVisionClassifier.ExtractLabel(ToolUseResponse("1291"), out var blockReason);
+        var label = AnthropicVisionClassifier.ExtractLabel(ToolUseResponse("1291"), "report_code", out var blockReason);
 
         Assert.Equal("1291", label);
         Assert.Null(blockReason);
@@ -175,7 +189,7 @@ public class AnthropicVisionClassifierExtractLabelTests
     [Fact]
     public void BasariliYanittaBulunamadiEtiketiDeAynenCikarilir()
     {
-        var label = AnthropicVisionClassifier.ExtractLabel(ToolUseResponse("BULUNAMADI"), out var blockReason);
+        var label = AnthropicVisionClassifier.ExtractLabel(ToolUseResponse("BULUNAMADI"), "report_code", out var blockReason);
 
         Assert.Equal("BULUNAMADI", label);
         Assert.Null(blockReason);
@@ -191,7 +205,7 @@ public class AnthropicVisionClassifierExtractLabelTests
             }
             """;
 
-        var label = AnthropicVisionClassifier.ExtractLabel(json, out var blockReason);
+        var label = AnthropicVisionClassifier.ExtractLabel(json, "report_code", out var blockReason);
 
         Assert.Null(label);
         Assert.Equal("rate_limit_error", blockReason);
@@ -208,7 +222,7 @@ public class AnthropicVisionClassifierExtractLabelTests
             }
             """;
 
-        var label = AnthropicVisionClassifier.ExtractLabel(json, out var blockReason);
+        var label = AnthropicVisionClassifier.ExtractLabel(json, "report_code", out var blockReason);
 
         Assert.Null(label);
         Assert.Equal("max_tokens", blockReason);
@@ -224,7 +238,7 @@ public class AnthropicVisionClassifierExtractLabelTests
             }
             """;
 
-        var label = AnthropicVisionClassifier.ExtractLabel(json, out var blockReason);
+        var label = AnthropicVisionClassifier.ExtractLabel(json, "report_code", out var blockReason);
 
         Assert.Null(label);
         Assert.Equal("tool_use", blockReason);
@@ -233,9 +247,28 @@ public class AnthropicVisionClassifierExtractLabelTests
     [Fact]
     public void BozukJsonParseErrorDoner()
     {
-        var label = AnthropicVisionClassifier.ExtractLabel("{ bozuk json", out var blockReason);
+        var label = AnthropicVisionClassifier.ExtractLabel("{ bozuk json", "report_code", out var blockReason);
 
         Assert.Null(label);
         Assert.Equal("PARSE_ERROR", blockReason);
+    }
+}
+
+/// <summary>GeminiVisionClassifierBuildBrandUserPromptTests ile AYNI desen/sözleşme.</summary>
+public class AnthropicVisionClassifierBuildBrandUserPromptTests
+{
+    [Fact]
+    public void IpucuYoksaPromptDegismez()
+    {
+        Assert.Equal("temel prompt", AnthropicVisionClassifier.BuildBrandUserPrompt("temel prompt", null));
+    }
+
+    [Fact]
+    public void IpucuVarsaEkBaglamOlarakEklenir()
+    {
+        var result = AnthropicVisionClassifier.BuildBrandUserPrompt("temel prompt", "JOJOMINI");
+
+        Assert.StartsWith("temel prompt", result);
+        Assert.Contains("JOJOMINI", result);
     }
 }

@@ -561,6 +561,80 @@ public class ExcelPriceReaderTests
         finally { File.Delete(path); }
     }
 
+    /// <summary>GERÇEK VAKA ("ALİSA 2026.xls", NGZ/905462547278, 2026-08-21): aynı müşteri aynı
+    /// dosyayı 5 gün içinde 6 kez gönderdi, hiçbiri hiç işlenmedi — worker her turda "Excel'de
+    /// olası bir ürün kodu sütunu bulunamadı" deyip klasörü atlıyordu (islendi.txt hiç
+    /// yazılmadığı için müşteriye ne başarı ne hata bildirimi gitti). Dosyanın gerçek şekli: bir
+    /// başlık satırı VAR ama kaymış/eksik — "No" boş bir sütunun üstünde duruyor, "Stok Adı" gerçek
+    /// açıklama sütununun üstünde ama kod VE fiyat sütunlarının İKİSİNDE de hiç başlık metni yok.
+    /// Bu yüzden hiçbir satır "kod"+"fiyat" başlık çiftini karşılamıyor (headerRow bulunamıyor) ve
+    /// akış başlıksız-tablo sezgisine düşüyor. O sezginin eski hâli (`rows.Take(11)`, sadece ilk 11
+    /// satır) İLK BİRKAÇ veri satırının TESADÜFEN fiyatı boş olması yüzünden yanılıyordu: dosyanın
+    /// baskın satır şekli 3 hücre (kod+açıklama+fiyat, 35 satırın 29'u) olmasına rağmen ilk 11
+    /// satırlık dar örneklemde 2-hücreli satırlar (fiyatı boş ürünler + başlık satırının kendisi,
+    /// TESADÜFEN aynı hücre sayısı) daha sık görünüyordu — moda yanlış hesaplanıyor, ilk eşleşen
+    /// satır olarak (yanlışlıkla) başlık satırının KENDİSİ seçiliyordu, bu da kod/fiyat yerine
+    /// tamamen boş/alakasız sütunları "kod sütunu" sanıp sıfır fiyat üretiyordu. Düzeltme: moda,
+    /// TÜM satırlar üzerinden hesaplanıyor — küçük örneklem sapmasına artık bağışık. Bu test,
+    /// fiyatı boş ürünlerin başlık satırının HEMEN ardından, fiyatlı çoğunluktan ÖNCE gelmesini
+    /// (orijinal dosyadaki sıralamayla aynı) bilinçli olarak koruyor — asıl regresyon tam bu
+    /// sıralamada ortaya çıkıyordu.</summary>
+    [Fact]
+    public void LoadPricesFromExcel_KaymisBasliklıBoslukluFiyatliVeri_ModaTumSatirlaraGoreDogruBulunur()
+    {
+        using var wb = new XLWorkbook();
+        var ws = wb.Worksheets.Add("Sheet1");
+        // Kaymış/eksik başlık satırı: "No" boş bir sütunun üstünde, kod VE fiyat sütunlarının
+        // ikisinde de hiç başlık metni yok — sadece açıklama sütununun ("Stok Adı") başlığı var.
+        ws.Cell(1, 1).Value = "No";
+        ws.Cell(1, 3).Value = "Stok Adı";
+        // Başlıktan sonra, veriden önce birkaç "önsöz" satırı (depo bilgisi, banner) — gerçek
+        // dosyadaki gibi.
+        ws.Cell(2, 1).Value = "-";
+        ws.Cell(2, 2).Value = "Depo : MERKEZ DEPO";
+        ws.Cell(3, 3).Value = "***********2026 ÜÇİPLİK ***********";
+
+        // Ürün satırları — sıralama VE fiyatsız/fiyatlı örüntü orijinal dosyadaki İLK 15 satırla
+        // BİREBİR aynı (bilinçli olarak kopyalandı): eski regresyon tam bu ilk birkaç satırın
+        // fiyatsız/fiyatlı KARIŞIMINDA ortaya çıkıyordu — fiyatsız satırları tek bir yere toplamak
+        // (ör. hepsini baştan) küçük-örneklem yanılgısını YENİDEN ÜRETMEZ, gerçek dosyadaki gibi
+        // dağılmaları gerekir. Kod sütunu B (2), açıklama C (3), fiyat D (4, null ise boş bırakılır).
+        var rows = new (string Code, decimal? Price)[]
+        {
+            ("FEELY-1573", null),      ("FEELY-1579", null),      ("FEELY-1572", 355.00m),
+            ("FEELY-1577", null),      ("FEELY-1574", 355.00m),   ("FEELY-1571", 395.00m),
+            ("FEELY-1570", 265.00m),   ("FEELY-1569", null),      ("FEELY-1568", 375.00m),
+            ("FEELY-1575", null),      ("FEELY-1567", 265.00m),   ("FELLY-1565", 270.00m),
+            ("FEELY-1564", 285.00m),   ("FEELY-1563", 288.00m),   ("FEELY-1562", 345.00m),
+        };
+        int row = 5;
+        foreach (var (code, price) in rows)
+        {
+            ws.Cell(row, 2).Value = code;
+            ws.Cell(row, 3).Value = "@ AÇIKLAMA " + code;
+            if (price.HasValue)
+                ws.Cell(row, 4).Value = price.Value.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture) + " TL";
+            row++;
+        }
+
+        var path = Path.Combine(Path.GetTempPath(), $"pricebot_test_{Guid.NewGuid():N}.xlsx");
+        wb.SaveAs(path);
+        try
+        {
+            var prices = ExcelPriceReader.LoadPricesFromExcel(path);
+
+            foreach (var (code, price) in rows.Where(r => r.Price.HasValue))
+            {
+                Assert.True(prices.ContainsKey(code), $"Kod {code} bulunamadı — sütun sessizce elendi (eski regresyon).");
+                Assert.Equal(price!.Value, prices[code]);
+            }
+            // Fiyatsız ürünler kod sütununda ADAY olarak görünmemeli (fiyat parse edilemediği
+            // için satır atlanır) — ama en azından doğru sütun seçildiği için TAMAMEN boş dönmemeli.
+            Assert.False(prices.ContainsKey("FEELY-1573"));
+        }
+        finally { File.Delete(path); }
+    }
+
     /// <summary>GERÇEK VAKA (NGZ "2026-KADİFE.xlsx" / BABYİM, Gonderim_20260817_161752_6b1484cc,
     /// 2026-08-17): asıl başlık satırından (B="Ürün Numarası", E="GÜNCEL FİYAT" — kod ve fiyat
     /// AYRI sütunlarda) ÖNCE, tek dolu hücreli bir birleşik banner satırı var: " Kadife Ürün
@@ -832,6 +906,48 @@ public class ExcelPriceReaderTests
             Assert.Empty(tokens);
         }
         finally { File.Delete(path); }
+    }
+
+    /// <summary>Gerçek vaka (2026-08-21, JOJOMİNİ): bot'un dosya adına eklediği zaman damgası/hash
+    /// önekiyle birlikte gelen gerçek dosya adı ("20260821_110620295_0eae04_Jojomini fiyat.xlsx")
+    /// içindeki marka adı ("Jojomini", bitişik) Nebim'de araya boşluklu kayıtlı marka adıyla
+    /// ("JOJO MİNİ") BrandMatcher'ın boşluksuz-ad yedek kuralı üzerinden eşleşiyor — ürün
+    /// görsellerindeki aşırı dekoratif logo fontu hiçbir OCR/görü sağlayıcısı tarafından
+    /// okunamasa bile. Zaman damgası/hash önek token'larının ("20260821", "0EAE04") yanlışlıkla
+    /// bir markayla eşleşmediği de doğrulanır.</summary>
+    [Fact]
+    public void ExtractFileNameTokens_MarkaAdiBitisikDosyaAdinda_BoslukluNebimAdiylaEslesir()
+    {
+        var tokens = ExcelPriceReader.ExtractFileNameTokens("20260821_110620295_0eae04_Jojomini fiyat.xlsx");
+
+        Assert.Contains(tokens.Keys, k => k.Contains("Jojomini"));
+
+        var brands = new List<BrandMultiplier> { new("JOJO", "JOJO MİNİ", 0.977812m) };
+        var outcome = BrandMatcher.MatchFromOcrTokens(tokens, brands);
+        Assert.NotNull(outcome.Brand);
+        Assert.Equal("JOJO MİNİ", outcome.Brand!.FullName);
+    }
+
+    /// <summary>Dosya adında marka adı hiç geçmiyorsa (jenerik bir ad, ör. "fiyat listesi.xlsx")
+    /// yanlışlıkla alakasız bir markayla eşleşmemeli — BrandMatcher'ın kelime-bazlı-tam-eşleşme +
+    /// jenerik-kelime güvenlik ağı burada da aynen geçerli.</summary>
+    [Fact]
+    public void ExtractFileNameTokens_JenerikDosyaAdi_HicMarkaEslesmez()
+    {
+        var tokens = ExcelPriceReader.ExtractFileNameTokens("20260821_110620295_0eae04_fiyat listesi.xlsx");
+
+        var brands = new List<BrandMultiplier> { new("JOJO", "JOJO MİNİ", 0.977812m) };
+        var outcome = BrandMatcher.MatchFromOcrTokens(tokens, brands);
+        Assert.Null(outcome.Brand);
+    }
+
+    /// <summary>Boş/uzantısız dosya adı için boş sözlük döner — BrandMatcher'a boş geçmek
+    /// zararsızdır (Brand=null), tıpkı ExtractLetterheadTokens'ın boş-sözlük durumunda olduğu gibi.</summary>
+    [Fact]
+    public void ExtractFileNameTokens_BosDosyaAdi_BosSozlukDoner()
+    {
+        var tokens = ExcelPriceReader.ExtractFileNameTokens("");
+        Assert.Empty(tokens);
     }
 }
 

@@ -131,6 +131,30 @@ public class ExcelPriceReader
         return tokens;
     }
 
+    /// <summary>Excel dosya adının kendisini <see cref="BrandMatcher.MatchFromOcrTokens"/>'a
+    /// verilebilecek bir token sözlüğüne çevirir. Gerçek vaka (2026-08-21, JOJOMİNİ): gönderen,
+    /// fiyat listesini genelde markanın adını içeren bir dosya adıyla gönderiyor ("Jojomini
+    /// fiyat.xlsx") — bot bunun başına kendi zaman damgası/hash önekini ekliyor
+    /// ("20260821_110620295_0eae04_Jojomini fiyat.xlsx") ama marka adı metin olarak duruyor.
+    /// Bu vakada ürün görsellerindeki logo ("jojomini") tek kelime, aşırı dekoratif kıvrık bir
+    /// fontla basılıydı ve hiçbir OCR/görü sağlayıcısı okuyamadı; oysa dosya adı aynı kelimeyi
+    /// OCR belirsizliği olmadan, düz metin olarak zaten taşıyordu.
+    ///
+    /// Letterhead taramasıyla AYNI güvenlik ağını kullanır (BrandMatcher'ın kelime-bazlı-tam-
+    /// eşleşme + jenerik-kelime filtresi + çelişkili-NetCarpan koruması) — dosya adı da tek bir
+    /// "token" olarak sabit yüksek güvenle (100 — insan/bot yazdığı düz metin, OCR gürültüsü yok)
+    /// eklenir; BrandMatcher zaten kendi içinde kelimelere ayırıp aynı kuralları uygular. Bot'un
+    /// eklediği sayısal/hex zaman damgası önekleri (örn. "20260821", "0eae04") harf içermediği
+    /// veya markaların hiçbirinin adına denk gelmediği için zararsız gürültüdür. Bulunamazsa
+    /// davranış hiç değişmez, akış letterhead/Gemini/WhatsApp sorusuna düşer.</summary>
+    public static Dictionary<string, float> ExtractFileNameTokens(string excelName)
+    {
+        var nameWithoutExtension = Path.GetFileNameWithoutExtension(excelName);
+        return string.IsNullOrWhiteSpace(nameWithoutExtension)
+            ? new Dictionary<string, float>(StringComparer.Ordinal)
+            : new Dictionary<string, float>(StringComparer.Ordinal) { [nameWithoutExtension] = 100f };
+    }
+
     /// <summary>Excel'i düz bir satır/sütun metin ızgarasına yükler — aşağıdaki kod/fiyat sütunu
     /// tespiti mantığı, veriyi hangi kütüphanenin ürettiğiyle ilgilenmeden bu ızgara üzerinden
     /// çalışır. Önce ClosedXML denenir (gerçek .xlsx/.xlsm, OOXML/ZIP tabanlı). ClosedXML bir
@@ -317,10 +341,25 @@ public class ExcelPriceReader
             // başlık/banner satırı, asıl veri sonraki satırdan başlıyor ve DAHA FAZLA sütun
             // kullanıyor). Eski "ilk kullanılan satır, en soldaki sütun kod" varsayımı bu durumda
             // banner satırının dar sütun aralığı yüzünden yanlış sütunu (örn. açıklama) kod
-            // sanıyordu. Referans satır artık ilk birkaç satır arasında EN SIK görülen kullanılan-
-            // sütun-sayısına sahip olanı (asıl veri düzeni) — banner gibi tek seferlik satırlar
-            // elenir.
-            var sample = rows.Take(11).ToList();
+            // sanıyordu. Referans satır artık TÜM tabloda EN SIK görülen kullanılan-sütun-sayısına
+            // sahip olanı (asıl veri düzeni) — banner gibi tek seferlik satırlar elenir.
+            //
+            // ÖRNEKLEM TÜM SATIRLAR OLMALI, İLK BİRKAÇI DEĞİL (2026-08-21 düzeltmesi, gerçek vaka:
+            // NGZ/ALİSA "ALİSA 2026.xls" — aynı müşteri 5 gün içinde aynı dosyayı 6 kez gönderdi,
+            // hiçbiri hiç işlenmedi). Bu dosyada başlık satırı ("No"/"Stok Adı") 2 dolu hücreye
+            // sahipti ve İLK 11 satır arasında (eski `rows.Take(11)`) TESADÜFEN fiyatı boş bırakılmış
+            // ilk birkaç ürün satırıyla (onlar da kod+açıklama = 2 dolu hücre, fiyat sütunu o
+            // satırlarda boştu) aynı "moda" düşüyordu — küçük örneklemde 2-hücreli satırlar 3-hücreli
+            // (kod+açıklama+fiyat, dosyanın asıl/baskın satır şekli, 35 satırın 29'u) satırlardan
+            // daha SIK görünüyordu, ilk eşleşen de (yanlışlıkla) başlık satırının KENDİSİ oluyordu —
+            // sonuç: kod/fiyat sütunları hiç bulunamadı, `LoadCandidateCodeColumns` sürekli boş
+            // döndü, klasör HER turda "olası bir ürün kodu sütunu bulunamadı" ile atlandı.
+            // TÜM satırlar üzerinden hesaplanan moda, dosyanın gerçek baskın satır şeklini (3
+            // hücre) doğru buluyor; ilk birkaç satırdaki tesadüfi örneklem sapmasına karşı bağışık.
+            // Banner/tek-seferlik satır senaryosunda (yukarıdaki 2026-08-07 vakası) bu değişiklik
+            // sonucu değiştirmiyor — banner zaten TEK satır, örneklem büyüdükçe payı küçülüyor,
+            // moda hesabını etkilemesi daha da zorlaşıyor.
+            var sample = rows;
             var modeCount = sample
                 .GroupBy(r => r.Cells.Count)
                 .OrderByDescending(g => g.Count())

@@ -15,8 +15,9 @@ komutlar bu projenin gerçek yapılandırmasına göredir.
 - Worker, bot'un dosya yazdığı `C:\PriceBot\Incoming\` klasörünü doğrudan dosya sistemi üzerinden okuyor
   → bu klasör de aynı sunucuda olmalı (worker ile bot aynı makinede olduğu için bu zaten sağlanır).
 - Worker, Nebim ERP'nin SQL Server'ına (`appsettings.json`'daki connection string,
-  `asistyazilim.pakabulut.com,9023`) ağ üzerinden bağlanıyor → sunucudan bu adrese giden trafiğin
-  firewall'da açık olması gerekir.
+  `46.221.62.174,9034` / veritabanı `NGZTekstil` — 2026-08-21'de eski `asistyazilim.pakabulut.com,9023`
+  / `AsistWP_V3` bağlantısından bu bağlantıya geçildi) ağ üzerinden bağlanıyor → sunucudan bu adrese
+  giden trafiğin firewall'da açık olması gerekir.
 
 Yani pratikte: **WhatsApp bot'unun zaten çalıştığı sunucuya** worker'ı kuracaksın.
 
@@ -33,10 +34,10 @@ Yani pratikte: **WhatsApp bot'unun zaten çalıştığı sunucuya** worker'ı ku
 2. **Visual C++ Redistributable (x64)** — Tesseract (OCR) ve SkiaSharp native DLL'leri bazı sunucularda
    buna ihtiyaç duyar. Sunucuda zaten başka .NET/Windows uygulamaları çalışıyorsa muhtemelen kurulu.
    Değilse Microsoft'un "Visual C++ Redistributable" x64 paketini kur.
-3. Nebim SQL Server'a **ağ erişimi**: sunucudan `asistyazilim.pakabulut.com:9023` adresine bağlantı
+3. Nebim SQL Server'a **ağ erişimi**: sunucudan `46.221.62.174:9034` adresine bağlantı
    test et:
    ```
-   Test-NetConnection -ComputerName asistyazilim.pakabulut.com -Port 9023
+   Test-NetConnection -ComputerName 46.221.62.174 -Port 9034
    ```
    `TcpTestSucceeded : True` olmalı. Değilse firewall/VPN kontrolü gerekir.
 4. WhatsApp bot'unun sunucuda kurulu ve `2304` portunda (HTTPS) dinlediğinden emin ol (bot ayrı bir

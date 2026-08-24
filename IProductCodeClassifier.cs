@@ -19,9 +19,14 @@ namespace PriceBotPipeline;
 /// damgalama/gönderim süresi) "bekleme" olarak kullanır (bkz. Worker.cs "Aşama 3.5").
 ///
 /// Marka tespiti (ClassifyBrandAsync) bu arayüze DAHİL DEĞİL — o klasör-genelinde farklı bir akışa
-/// sahip (ilk 4 görsel, ilk başarılı sonuçta dur) ve Worker.cs'te ayrı, tek bir sağlayıcıyla
-/// (GeminiVisionClassifier) çağrılıyor; kod tespitindeki gibi bir kota-tükenmesi sorunu hiç
-/// gözlenmedi (bkz. CLAUDE.md), bu yüzden çoklu-sağlayıcı zincirine dahil edilmedi.</summary>
+/// sahip (ilk 4 görsel, ilk başarılı sonuçta dur). 2026-08-24 GÜNCELLEME: aşağıdaki eski gerekçe
+/// ("kod tespitindeki gibi bir kota-tükenmesi sorunu hiç gözlenmedi, bu yüzden çoklu-sağlayıcı
+/// zincirine dahil edilmedi") ARTIK GEÇERLİ DEĞİL — marka tespiti de kendi <see
+/// cref="IBrandClassifier"/> arayüzü üzerinden AYRI bir çoklu-sağlayıcı zincirine kavuştu (bkz. o
+/// arayüzün dosya başı yorumu). İki arayüzün AYRI tutulmasının nedeni artık sadece tarihsel değil,
+/// yapısal: dönüş tipleri (kod: string?/RetryAfer üçlüsü; marka: BrandMultiplier?/RawLabel/
+/// ApiFailed üçlüsü) ve iş kuralları (kod: RetryAfter ile erteleme var; marka: yok, klasör başına
+/// tek seferlik) farklı.</summary>
 public interface IProductCodeClassifier
 {
     Task<(string? Code, bool ApiFailed, TimeSpan? RetryAfter)> ClassifyCodeAsync(

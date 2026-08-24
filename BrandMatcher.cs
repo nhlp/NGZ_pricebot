@@ -19,6 +19,16 @@ public sealed record OcrBrandOutcome(BrandMultiplier? Brand, List<string> Matche
 /// birebir değil küçük yazım farkıyla (Levenshtein) eşleştiğini belirtir (rapora yazılır).</summary>
 public sealed record UserBrandOutcome(BrandMultiplier? Brand, bool Approximate, List<string> Suggestions);
 
+/// <summary>Bir markanın resmi Nebim adıyla eşleşmeyen ama GERÇEKTEN teyit edilmiş bir kaynaktan
+/// (müşteri cevabı veya Gemini görü tespiti) doğrulanmış tek bir delil kelimesi ("kendini
+/// eğitme" — bkz. CLAUDE.md "Öğrenilmiş marka alias'ı" maddesi). Aynı klasörde bir daha
+/// karşılaşıldığında (aynı dekoratif logo fontu, aynı dosya-adı alışkanlığı) WhatsApp sorusuna
+/// düşmeden marka tespitine katkı sağlar. BrandFullName, alias'ın ait olduğu markanın Nebim
+/// FullName'idir (eşleştirme anahtarı BrandMatcher'ın geri kalanıyla tutarlı olsun diye);
+/// Nebim tarafında marka adı değişir/silinirse alias sessizce hiçbir markayla eşleşmez olur
+/// (zararsız, ölü veri — bkz. LearnedBrandAliasStore).</summary>
+public sealed record LearnedAlias(string BrandFullName, string Alias, DateTime LearnedAtUtc, string Source, string Folder);
+
 /// <summary>Marka adı eşleştirme mantığı — tamamen saf/deterministik, DB ve OCR bağımsız.
 ///
 /// Temel ilkeler:
@@ -204,6 +214,128 @@ public static class BrandMatcher
             return new OcrBrandOutcome(null, [], []);
 
         return new OcrBrandOutcome(approxDistinct[0].Brand, [approxDistinct[0].Evidence], [], Approximate: true);
+    }
+
+    /// <summary>Daha önce teyit edilmiş (müşteri cevabı veya Gemini görü tespiti) alias
+    /// kelimelerinden klasör markasını bulur — MatchFromOcrTokens'ın "resmi ad" araması hiçbir
+    /// şey bulamadığında, ama Gemini'ye/soruya düşmeden önce denenir (ücretsiz + yerel).
+    /// Alias'lar zaten daha önce ExtractAliasCandidates güvenlik ağından geçip kaydedildiği
+    /// için burada fuzzy/Levenshtein YOK — birebir token eşleşmesi yeterli. Birden fazla
+    /// markanın alias'ı farklı NetCarpan'larla çakışırsa (nadiren — iki farklı marka aynı
+    /// dekoratif kelimeyi paylaşıyorsa) MatchFromOcrTokens ile aynı güvenlik ağı uygulanır:
+    /// belirsiz sayılıp null döner, çağıran taraf bir sonraki aşamaya (Gemini/soru) düşer.</summary>
+    public static OcrBrandOutcome MatchFromLearnedAliases(
+        IReadOnlyDictionary<string, float> rawTokens,
+        IReadOnlyList<LearnedAlias> learnedAliases,
+        IReadOnlyList<BrandMultiplier> brands)
+    {
+        if (learnedAliases.Count == 0) return new OcrBrandOutcome(null, [], []);
+
+        var tokenWords = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var (raw, conf) in rawTokens)
+        {
+            if (conf < MinWordConfidence) continue;
+            foreach (var word in NormalizeToWords(raw))
+            {
+                tokenWords.Add(word);
+                if (word.Any(char.IsAsciiLetter) && word.Any(char.IsAsciiDigit))
+                    tokenWords.Add(LetterizeDigits(word));
+            }
+        }
+        if (tokenWords.Count == 0) return new OcrBrandOutcome(null, [], []);
+
+        var brandByJoinedName = brands
+            .GroupBy(b => NormalizeJoined(b.FullName))
+            .ToDictionary(g => g.Key, g => g.First(), StringComparer.Ordinal);
+
+        var matches = new List<(BrandMultiplier Brand, string Evidence)>();
+        foreach (var alias in learnedAliases)
+        {
+            if (!tokenWords.Contains(alias.Alias)) continue;
+            // Nebim tarafında marka adı değişmiş/silinmişse alias artık hiçbir markayla
+            // eşleşmez (zararsız, ölü veri) — TryGetValue bu durumu sessizce atlar.
+            if (!brandByJoinedName.TryGetValue(NormalizeJoined(alias.BrandFullName), out var brand)) continue;
+            matches.Add((brand, alias.Alias));
+        }
+        if (matches.Count == 0) return new OcrBrandOutcome(null, [], []);
+
+        var distinct = matches
+            .GroupBy(m => m.Brand.FullName)
+            .Select(g => (Brand: g.First().Brand, Evidence: g.Select(m => m.Evidence).Distinct().ToList()))
+            .ToList();
+
+        var carpans = distinct.Select(d => d.Brand.NetCarpan).Distinct().ToList();
+        if (carpans.Count > 1)
+            return new OcrBrandOutcome(null, [], distinct.Select(d => d.Brand.FullName).ToList());
+
+        var winner = distinct[0];
+        return new OcrBrandOutcome(winner.Brand, winner.Evidence, []);
+    }
+
+    /// <summary>Teyit edilmiş bir marka için OCR/dosya-adı/letterhead delil token'larından
+    /// öğrenilebilecek aday alias kelimelerini çıkarır (saf/deterministik — dosya I/O yok,
+    /// LearnedBrandAliasStore bunu çağırıp diske yazar). Üç filtre uygulanır:
+    /// (1) jenerik veya çok kısa (&lt; 4 harf) kelimeler elenir — MatchFromOcrTokens'taki
+    ///     IsDistinctive ile aynı kural, tek başına kanıt sayılmazlar;
+    /// (2) markanın kendi resmi adının zaten bir parçası olan kelimeler elenir — bunlar zaten
+    ///     MatchFromOcrTokens ile bulunur, öğrenmenin katma değeri yok;
+    /// (3) BAŞKA bir markanın resmi adında geçen kelimeler elenir — güvenlik ağı: yanlış
+    ///     markaya yönlendirmemek, hiç öğrenmemekten daha önemli (AddSpacedSuffixAliases'taki
+    ///     çakışma güvenlik ağıyla aynı ruh).</summary>
+    public static List<string> ExtractAliasCandidates(
+        IReadOnlyDictionary<string, float> evidenceTokens,
+        BrandMultiplier confirmedBrand,
+        IReadOnlyList<BrandMultiplier> allBrands)
+    {
+        var ownWords = NormalizeToWords(confirmedBrand.FullName)
+            .Where(w => w.Length >= 2)
+            .ToHashSet(StringComparer.Ordinal);
+        var otherBrandWords = allBrands
+            .Where(b => !string.Equals(b.FullName, confirmedBrand.FullName, StringComparison.Ordinal))
+            .SelectMany(b => NormalizeToWords(b.FullName))
+            .ToHashSet(StringComparer.Ordinal);
+
+        var candidates = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var (raw, conf) in evidenceTokens)
+        {
+            if (conf < MinWordConfidence) continue;
+            foreach (var word in NormalizeToWords(raw))
+            {
+                if (!IsDistinctive(word)) continue;
+                if (ownWords.Contains(word)) continue;
+                if (otherBrandWords.Contains(word)) continue;
+                candidates.Add(word);
+            }
+        }
+        return candidates.ToList();
+    }
+
+    /// <summary>Vision modeline (Gemini/Groq/Claude) "OCR bu görsellerde belirsiz de olsa şunu
+    /// okudu" ipucu olarak verilecek kelimeleri seçer (2026-08-24, kullanıcı isteği: "farklı
+    /// fontlarla yazılmış marka isimlerini daha iyi okuyabilmek" — bkz. IBrandClassifier.cs
+    /// dosya başı "OCR İPUCU ENJEKSİYONU" notu). IsDistinctive filtresi MatchFromOcrTokens/
+    /// ExtractAliasCandidates ile AYNI (jenerik/çok kısa kelimeler elenir) ama burada markayla
+    /// eşleştirmeye ÇALIŞILMAZ — sadece ham, en yüksek güvenli kelimeler güvene göre sıralanıp
+    /// döndürülür. Halüsinasyon riskini artırmaz: vision modeli hâlâ SADECE kapalı listeden
+    /// (enum) seçim yapmaya zorlanıyor, bu sadece ek bağlam.</summary>
+    public static List<string> ExtractDistinctiveHintWords(IReadOnlyDictionary<string, float> rawTokens, int maxWords = 5)
+    {
+        var words = new Dictionary<string, float>(StringComparer.Ordinal);
+        foreach (var (raw, conf) in rawTokens)
+        {
+            if (conf < MinWordConfidence) continue;
+            foreach (var word in NormalizeToWords(raw))
+            {
+                if (!IsDistinctive(word)) continue;
+                if (!words.TryGetValue(word, out var best) || conf > best)
+                    words[word] = conf;
+            }
+        }
+        return words
+            .OrderByDescending(kv => kv.Value)
+            .Take(maxWords)
+            .Select(kv => kv.Key)
+            .ToList();
     }
 
     /// <summary>Marka hiç tespit edilemediğinde (kesin de yaklaşık da eşleşme yok) İLK soruya

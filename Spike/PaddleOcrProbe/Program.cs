@@ -99,7 +99,7 @@ foreach (var (file, scan) in scans)
         {
             var price = excelPrices[m.Code];
             var fuzzy = m.IsFuzzy ? " FUZZY" : "";
-            Console.WriteLine($"[DAMGALANDI{fuzzy}] {Path.GetFileName(file)} -> kod {m.Code} (güven {m.Confidence:N0}) -> {price} TL");
+            Console.WriteLine($"[DAMGALANDI{fuzzy}] {Path.GetFileName(file)} -> kod {m.Code} (güven {m.Confidence:N0}) -> {price} TL. Adaylar: {string.Join(", ", scan.Candidates.Take(12))}");
         }
     }
 }

@@ -334,4 +334,141 @@ public class BrandMatcherTests
         Assert.Null(outcome.Brand);
         Assert.Empty(outcome.Suggestions);
     }
+
+    // ---- Öğrenilmiş alias (2026-08-21, "kendini eğitme") ----
+
+    [Fact]
+    public void ExtractAliasCandidates_AyirtEdiciKesikOkuma_AdayOlur()
+    {
+        // "LILAKS" resmi ada ("LİLAX") ait değil, jenerik değil, başka bir markanın adıyla da
+        // çakışmıyor — geçerli bir öğrenilebilir alias adayıdır.
+        var confirmed = Brands.Single(b => b.FullName == "LİLAX");
+        var candidates = BrandMatcher.ExtractAliasCandidates(Tokens(("LILAKS", 90f)), confirmed, Brands);
+        Assert.Equal(new[] { "LILAKS" }, candidates);
+    }
+
+    [Fact]
+    public void ExtractAliasCandidates_JenerikVeCokKisaKelime_Elenir()
+    {
+        var confirmed = Brands.Single(b => b.FullName == "LİLAX");
+        var candidates = BrandMatcher.ExtractAliasCandidates(
+            Tokens(("BABY", 90f), ("LI", 90f), ("LILAKS", 90f)), confirmed, Brands);
+        Assert.Equal(new[] { "LILAKS" }, candidates);
+    }
+
+    [Fact]
+    public void ExtractAliasCandidates_BaskaMarkaAdiylaCakisan_Elenir()
+    {
+        // "PEPE" listede AYRI bir markanın (kendi NetCarpan'ıyla) resmi adı — LİLAX için
+        // alias olarak öğrenilirse ileride yanlış markayla eşleştirebilir, güvenlik ağı bunu eler.
+        var confirmed = Brands.Single(b => b.FullName == "LİLAX");
+        var candidates = BrandMatcher.ExtractAliasCandidates(Tokens(("PEPE", 90f)), confirmed, Brands);
+        Assert.Empty(candidates);
+    }
+
+    [Fact]
+    public void ExtractAliasCandidates_MarkaninKendiAdi_Elenir()
+    {
+        // "LILAX" zaten resmi adın kendisi — MatchFromOcrTokens ile bulunur, öğrenmenin
+        // katma değeri yok.
+        var confirmed = Brands.Single(b => b.FullName == "LİLAX");
+        var candidates = BrandMatcher.ExtractAliasCandidates(Tokens(("LILAX", 90f)), confirmed, Brands);
+        Assert.Empty(candidates);
+    }
+
+    [Fact]
+    public void ExtractAliasCandidates_DusukGuvenToken_Elenir()
+    {
+        var confirmed = Brands.Single(b => b.FullName == "LİLAX");
+        var candidates = BrandMatcher.ExtractAliasCandidates(Tokens(("LILAKS", 30f)), confirmed, Brands);
+        Assert.Empty(candidates);
+    }
+
+    [Fact]
+    public void LearnedAlias_TekEslesme_MarkayiBulur()
+    {
+        var lilax = Brands.Single(b => b.FullName == "LİLAX");
+        var learned = new List<LearnedAlias> { new(lilax.FullName, "LILAKS", DateTime.UtcNow, "müşteri cevabı", "Gonderim_test") };
+        var outcome = BrandMatcher.MatchFromLearnedAliases(Tokens(("LILAKS", 90f)), learned, Brands);
+        Assert.Equal("LİLAX", outcome.Brand?.FullName);
+    }
+
+    [Fact]
+    public void LearnedAlias_HicKayitYokken_BosDoner()
+    {
+        var outcome = BrandMatcher.MatchFromLearnedAliases(Tokens(("LILAKS", 90f)), [], Brands);
+        Assert.Null(outcome.Brand);
+        Assert.Empty(outcome.AmbiguousNames);
+    }
+
+    [Fact]
+    public void LearnedAlias_TokenDusukGuvenli_Eslesmez()
+    {
+        var lilax = Brands.Single(b => b.FullName == "LİLAX");
+        var learned = new List<LearnedAlias> { new(lilax.FullName, "LILAKS", DateTime.UtcNow, "müşteri cevabı", "Gonderim_test") };
+        var outcome = BrandMatcher.MatchFromLearnedAliases(Tokens(("LILAKS", 30f)), learned, Brands);
+        Assert.Null(outcome.Brand);
+    }
+
+    [Fact]
+    public void LearnedAlias_FarkliNetCarpanliIkiMarka_Belirsiz()
+    {
+        // LİLAX ve PEPE farklı NetCarpan'a sahip — aynı görselde ikisinin de alias'ı çıkarsa
+        // (gerçekte OCR gürültüsü ya da veri hatası) otomatik karar verilemez, kullanıcıya sorulur.
+        var lilax = Brands.Single(b => b.FullName == "LİLAX");
+        var pepe = Brands.Single(b => b.FullName == "PEPE");
+        var learned = new List<LearnedAlias>
+        {
+            new(lilax.FullName, "LILAKS", DateTime.UtcNow, "müşteri cevabı", "Gonderim_a"),
+            new(pepe.FullName, "PEPPO", DateTime.UtcNow, "Gemini görü modeli", "Gonderim_b"),
+        };
+        var outcome = BrandMatcher.MatchFromLearnedAliases(Tokens(("LILAKS", 90f), ("PEPPO", 90f)), learned, Brands);
+        Assert.Null(outcome.Brand);
+        Assert.Equal(2, outcome.AmbiguousNames.Count);
+    }
+
+    [Fact]
+    public void LearnedAlias_MarkaListedenSilinmisse_SessizceGormezdenGelinir()
+    {
+        // Nebim tarafında marka adı değişmiş/silinmiş olabilir — alias artık hiçbir markaya
+        // karşılık gelmiyor, hata fırlatmadan sadece eşleşmeyen sayılır.
+        var learned = new List<LearnedAlias> { new("ARTIK YOK MARKASI", "HAYALET", DateTime.UtcNow, "müşteri cevabı", "Gonderim_test") };
+        var outcome = BrandMatcher.MatchFromLearnedAliases(Tokens(("HAYALET", 90f)), learned, Brands);
+        Assert.Null(outcome.Brand);
+        Assert.Empty(outcome.AmbiguousNames);
+    }
+
+    // ---- OCR ipucu enjeksiyonu (2026-08-24, "markaları daha iyi tespit edebilmek") ----
+
+    [Fact]
+    public void ExtractDistinctiveHintWords_AyirtEdiciKelimeleriGuvenSirasinaGoreDoner()
+    {
+        var hints = BrandMatcher.ExtractDistinctiveHintWords(
+            Tokens(("BABY", 90f), ("FLAMINDO", 70f), ("JOJOMINI", 85f)));
+        // BABY jenerik olduğu için elenir; kalanlar güvene göre (JOJOMINI 85 > FLAMINDO 70) sıralı.
+        Assert.Equal(new[] { "JOJOMINI", "FLAMINDO" }, hints);
+    }
+
+    [Fact]
+    public void ExtractDistinctiveHintWords_DusukGuvenVeCokKisaKelime_Elenir()
+    {
+        var hints = BrandMatcher.ExtractDistinctiveHintWords(
+            Tokens(("ABC", 90f), ("LILAKS", 30f)));
+        Assert.Empty(hints);
+    }
+
+    [Fact]
+    public void ExtractDistinctiveHintWords_MaxWordsSinirlandirir()
+    {
+        var hints = BrandMatcher.ExtractDistinctiveHintWords(
+            Tokens(("AAAA", 90f), ("BBBB", 89f), ("CCCC", 88f), ("DDDD", 87f), ("EEEE", 86f), ("FFFF", 85f)),
+            maxWords: 3);
+        Assert.Equal(3, hints.Count);
+    }
+
+    [Fact]
+    public void ExtractDistinctiveHintWords_BosTokenlar_BosDoner()
+    {
+        Assert.Empty(BrandMatcher.ExtractDistinctiveHintWords(Tokens()));
+    }
 }
