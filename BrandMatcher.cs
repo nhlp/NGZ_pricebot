@@ -48,6 +48,16 @@ public static class BrandMatcher
     private const float MinWordConfidence = 40f;
     private const int MinDistinctiveLength = 4;
 
+    /// <summary>ExtractAliasCandidates'ın bir teyit olayı başına öğrenebileceği azami kelime
+    /// sayısı (2026-08-25, gerçek vaka — bkz. ExtractAliasCandidates dosya başı notu: TEK bir
+    /// Groq görü tespiti olayından 165-275 arası sınırsız alias öğrenilmişti, bunların büyük
+    /// çoğunluğu katalog şablonu/OCR gürültüsüydü). ExtractDistinctiveHintWords'ün zaten
+    /// kullandığı "en yüksek güvenli ilk N" desenini burada da uygulayarak tek bir olayın kaç
+    /// kelime öğrenebileceğini sertçe sınırlıyor — hangi kelimelerin gürültü olduğunu tam olarak
+    /// bilemesek bile (aşağıdaki CatalogNoiseWords listesi kaçınılmaz olarak eksik kalacak),
+    /// blast radius'u küçük tutuyor.</summary>
+    private const int MaxLearnedAliasesPerEvent = 6;
+
     /// <summary>Çocuk giyim markalarında o kadar yaygın kelimeler ki tek başlarına hangi
     /// markanın etikette olduğunu kanıtlayamazlar (normalize edilmiş hâlleriyle).</summary>
     private static readonly HashSet<string> GenericWords = new(StringComparer.Ordinal)
@@ -72,8 +82,39 @@ public static class BrandMatcher
         "KIDSWEAR",
     };
 
+    /// <summary>Katalog/telif/pazarlama şablon kelimeleri — GenericWords'ten farklı olarak
+    /// çocuk giyimine özgü değil, HERHANGİ bir üreticinin fotoğraf şablonunda/etiketinde
+    /// tekrarlayabilecek genel kelimeler (2026-08-25, gerçek vaka: tek bir Groq görü tespiti
+    /// olayından "COPYRIGHT", "HAKLARI", "SAKLIDIR", "BRAND", "STYLE", "PHOTOGRAPHY", "FASHION"
+    /// gibi kelimeler ORYEDA/PEPELİNO/YTM BEBE/JOLLY JOY'a alias olarak öğrenilmişti — hiçbiri
+    /// gerçekte o markalara özgü değildi, aynı fotoğraf stüdyosu şablonunu/katalog dilini
+    /// kullanan BAŞKA hiçbir ilgisi olmayan bir gönderim de bu kelimelerden birini içerebilir).
+    /// Bu liste KASITLI olarak sadece GÖZLENEN gerçek vakalardan geliyor — kapsamlı bir
+    /// İngilizce/Türkçe stopword sözlüğü değil ve asla tam olamaz; asıl güvenlik ağı
+    /// MaxLearnedAliasesPerEvent sınırlaması (bkz. ExtractAliasCandidates).</summary>
+    private static readonly HashSet<string> CatalogNoiseWords = new(StringComparer.Ordinal)
+    {
+        "COPYRIGHT", "RESERVED", "RIGHTS", "ALL", "TUM", "HAKLARI", "HAKLARIDIR", "SAKLIDIR",
+        "MONTH", "AGE", "YAS", "PHOTOGRAPHY", "STUDIO", "MEDYA", "FOTOGRAF", "DESIGN",
+        "BRAND", "STYLE", "FASHION", "FASHIONS", "VINTAGE", "EXCLUSIVE", "PREMIUM", "ORIGINAL",
+        "QUALITY", "COLLECTION", "SEASON", "NEW", "SHOP", "STORE", "MODE", "DENIM", "CORE",
+        "WILD", "ADVENTURE", "EXPLORER", "AWAITS", "FRIEND", "FRIENDS", "HELLO", "ENJOY",
+        "HAPPINESS", "SUCCESS", "SUPER", "STAY", "THANK", "THANKS", "ABOUT", "AGAINST",
+        "BELIEVE", "MONEY", "WANT", "WANTS", "WHAT", "THAT", "THERE", "YOUR", "YOURSELF",
+        "TAKIM", "IPTAKIM", "SATIS", "FIYAT", "LISTESI", "KODU", "ACIKLAMA",
+    };
+
+    /// <summary>Sadece rakamlardan oluşan token — ürün kodu, tarih ya da telefon numarası
+    /// parçası olabilir ama Nebim'deki hiçbir marka adı rakam DEĞİLDİR (bkz. NormalizeToWords),
+    /// bu yüzden hiçbir bağlamda marka kanıtı sayılmamalı (2026-08-25 vakasında "6378", "7015",
+    /// "20260824" gibi kod/tarih token'ları da alias olarak öğrenilmişti).</summary>
+    private static bool IsPurelyNumeric(string word) => word.Length > 0 && word.All(char.IsDigit);
+
     private static bool IsDistinctive(string word) =>
-        word.Length >= MinDistinctiveLength && !GenericWords.Contains(word);
+        word.Length >= MinDistinctiveLength
+        && !GenericWords.Contains(word)
+        && !CatalogNoiseWords.Contains(word)
+        && !IsPurelyNumeric(word);
 
     /// <summary>Metni büyük harfe çevirip Türkçe karakterleri ASCII'ye indirger ve
     /// harf/rakam-dışı her karakteri kelime ayracı sayar. "MOTHER&amp;ÇOJOK" → [MOTHER, COJOK],
@@ -274,14 +315,21 @@ public static class BrandMatcher
 
     /// <summary>Teyit edilmiş bir marka için OCR/dosya-adı/letterhead delil token'larından
     /// öğrenilebilecek aday alias kelimelerini çıkarır (saf/deterministik — dosya I/O yok,
-    /// LearnedBrandAliasStore bunu çağırıp diske yazar). Üç filtre uygulanır:
-    /// (1) jenerik veya çok kısa (&lt; 4 harf) kelimeler elenir — MatchFromOcrTokens'taki
-    ///     IsDistinctive ile aynı kural, tek başına kanıt sayılmazlar;
+    /// LearnedBrandAliasStore bunu çağırıp diske yazar). Dört filtre uygulanır:
+    /// (1) jenerik, çok kısa (&lt; 4 harf), katalog/pazarlama şablonu ya da sadece rakamdan
+    ///     oluşan kelimeler elenir — MatchFromOcrTokens'taki IsDistinctive ile aynı kural, tek
+    ///     başına kanıt sayılmazlar;
     /// (2) markanın kendi resmi adının zaten bir parçası olan kelimeler elenir — bunlar zaten
     ///     MatchFromOcrTokens ile bulunur, öğrenmenin katma değeri yok;
     /// (3) BAŞKA bir markanın resmi adında geçen kelimeler elenir — güvenlik ağı: yanlış
     ///     markaya yönlendirmemek, hiç öğrenmemekten daha önemli (AddSpacedSuffixAliases'taki
-    ///     çakışma güvenlik ağıyla aynı ruh).</summary>
+    ///     çakışma güvenlik ağıyla aynı ruh);
+    /// (4) kalan adaylardan sadece en yüksek güvenli ilk MaxLearnedAliasesPerEvent tanesi
+    ///     öğrenilir (2026-08-25, gerçek vaka — bkz. dosya başındaki CatalogNoiseWords notu:
+    ///     yukarıdaki üç filtre GÖZLENEN gürültüyü eler ama tanım gereği tam olamaz; bu sınır,
+    ///     hangi kelimenin gürültü olduğunu önceden bilemesek bile TEK bir teyit olayının blast
+    ///     radius'unu küçük tutan asıl güvenlik ağı — ExtractDistinctiveHintWords'ün zaten
+    ///     kullandığı "güvene göre sırala, ilk N'i al" deseniyle aynı).</summary>
     public static List<string> ExtractAliasCandidates(
         IReadOnlyDictionary<string, float> evidenceTokens,
         BrandMultiplier confirmedBrand,
@@ -295,7 +343,7 @@ public static class BrandMatcher
             .SelectMany(b => NormalizeToWords(b.FullName))
             .ToHashSet(StringComparer.Ordinal);
 
-        var candidates = new HashSet<string>(StringComparer.Ordinal);
+        var candidates = new Dictionary<string, float>(StringComparer.Ordinal);
         foreach (var (raw, conf) in evidenceTokens)
         {
             if (conf < MinWordConfidence) continue;
@@ -304,10 +352,15 @@ public static class BrandMatcher
                 if (!IsDistinctive(word)) continue;
                 if (ownWords.Contains(word)) continue;
                 if (otherBrandWords.Contains(word)) continue;
-                candidates.Add(word);
+                if (!candidates.TryGetValue(word, out var best) || conf > best)
+                    candidates[word] = conf;
             }
         }
-        return candidates.ToList();
+        return candidates
+            .OrderByDescending(kv => kv.Value)
+            .Take(MaxLearnedAliasesPerEvent)
+            .Select(kv => kv.Key)
+            .ToList();
     }
 
     /// <summary>Vision modeline (Gemini/Groq/Claude) "OCR bu görsellerde belirsiz de olsa şunu

@@ -384,6 +384,53 @@ public class BrandMatcherTests
         Assert.Empty(candidates);
     }
 
+    // ---- 2026-08-25 gerçek vaka: ORYEDA/PEPELİNO/YTM BEBE/JOLLY JOY'a tek bir Groq görü
+    // tespiti olayından sırasıyla 165/275/23/52 sınırsız alias öğrenilmişti (ürün kodu, tarih,
+    // katalog şablonu metni, OCR gürültüsü dahil) — bkz. BrandMatcher.cs CatalogNoiseWords ve
+    // MaxLearnedAliasesPerEvent dosya başı notları.
+
+    [Fact]
+    public void ExtractAliasCandidates_SadeceRakamdanOlusanToken_Elenir()
+    {
+        // Gerçek vakada "6378", "7015", "20260824" gibi ürün kodu/tarih token'ları öğrenilmişti.
+        var confirmed = Brands.Single(b => b.FullName == "LİLAX");
+        var candidates = BrandMatcher.ExtractAliasCandidates(
+            Tokens(("6378", 90f), ("20260824", 90f), ("LILAKS", 90f)), confirmed, Brands);
+        Assert.Equal(new[] { "LILAKS" }, candidates);
+    }
+
+    [Fact]
+    public void ExtractAliasCandidates_KatalogSablonuKelime_Elenir()
+    {
+        // Gerçek vakada "COPYRIGHT", "HAKLARI", "SAKLIDIR", "BRAND", "STYLE", "PHOTOGRAPHY"
+        // gibi hiçbir üreticiye özgü olmayan katalog/telif kelimeleri öğrenilmişti.
+        var confirmed = Brands.Single(b => b.FullName == "LİLAX");
+        var candidates = BrandMatcher.ExtractAliasCandidates(
+            Tokens(("COPYRIGHT", 90f), ("HAKLARI", 90f), ("SAKLIDIR", 90f), ("BRAND", 90f),
+                   ("STYLE", 90f), ("PHOTOGRAPHY", 90f), ("LILAKS", 90f)),
+            confirmed, Brands);
+        Assert.Equal(new[] { "LILAKS" }, candidates);
+    }
+
+    [Fact]
+    public void ExtractAliasCandidates_CokSayidaAday_EnYuksekGuvenliIlkNTaneyleSinirlanir()
+    {
+        // Gerçek vakada TEK bir teyit olayından 100'ün üzerinde geçerli-görünen (jenerik
+        // olmayan, başka markayla çakışmayan) kelime öğrenilmişti — MaxLearnedAliasesPerEvent
+        // (6) bunu ExtractDistinctiveHintWords'teki "güvene göre sırala, ilk N'i al" deseniyle
+        // sınırlıyor, en yüksek güvenli 6 kelime dışındakiler (aday olarak geçerli olsalar bile)
+        // öğrenilmez.
+        var confirmed = Brands.Single(b => b.FullName == "LİLAX");
+        var candidates = BrandMatcher.ExtractAliasCandidates(
+            Tokens(
+                ("AAAAAA", 95f), ("BBBBBB", 94f), ("CCCCCC", 93f), ("DDDDDD", 92f),
+                ("EEEEEE", 91f), ("FFFFFF", 90f), ("GGGGGG", 89f), ("HHHHHH", 88f)),
+            confirmed, Brands);
+
+        Assert.Equal(6, candidates.Count);
+        Assert.Equal(new[] { "AAAAAA", "BBBBBB", "CCCCCC", "DDDDDD", "EEEEEE", "FFFFFF" }, candidates);
+    }
+
     [Fact]
     public void LearnedAlias_TekEslesme_MarkayiBulur()
     {
