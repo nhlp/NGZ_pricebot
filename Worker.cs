@@ -17,6 +17,11 @@ public class Worker : BackgroundService
     /// alt klasörleri dahil) yeniden dolaştığı için tur süresi zamanla doğrusal büyüyordu —
     /// bkz. ArchiveIfComplete. Telefon alt klasör yapısı korunur: Archive\<telefon>\<Gonderim_...>.</summary>
     private const string ArchiveRoot = @"C:\PriceBot\Archive";
+    /// <summary>Fuzzy/AI-tahminli (kesin olmayan) eşleşmelerin müşteriye HİÇ gönderilmeden
+    /// bekletildiği alt klasör adı — her Gonderim_* klasörünün içinde "Islenmis" ile aynı
+    /// seviyede durur: "&lt;Gonderim_...&gt;\KontrolBekliyor\" (2026-08-28, kullanıcı isteği —
+    /// bkz. dosya başı Aşama 2.5/3.3 notları ve LearnedCodeCorrectionStore.cs).</summary>
+    private const string KontrolBekliyorDirName = "KontrolBekliyor";
     //private const string BotSendUrl = "http://localhost:3978/api/whatsapp/internal/send"; // Bot portu 3978'e eşitlendi!
     private const string BotSendUrl =  "https://asistyazilim.pakabulut.com:2304/api/whatsapp/internal/send";
     private static readonly HashSet<string> SupportedExtensions =
@@ -41,6 +46,17 @@ public class Worker : BackgroundService
     {
         _logger = logger;
     }
+
+    // "~$dosya.xlsx" Excel'in dosya açıkken oluşturduğu geçici kilit dosyasıdır, gerçek içerik
+    // değildir. .xls (eski Excel 97-2003 ikili format) de kabul edilir — ExcelPriceReader,
+    // ClosedXML dosyayı açamazsa (üretim vakası, 2026-08-03: müşteri .xls göndermişti) otomatik
+    // olarak ExcelDataReader'a düşer; burada sadece klasörün "hazır" sayılıp taranmaya değer
+    // olması için dosyanın var olması yeterli. Eskiden ExecuteAsync içinde local fonksiyondu,
+    // DeduplicateFolderFiles'ın da (2026-08-24) kullanabilmesi için class seviyesine taşındı.
+    private static IEnumerable<string> RealXlsxFiles(string dir) =>
+        Directory.EnumerateFiles(dir)
+            .Where(f => !Path.GetFileName(f).StartsWith("~$"))
+            .Where(f => f.EndsWith(".xlsx", StringComparison.OrdinalIgnoreCase) || f.EndsWith(".xls", StringComparison.OrdinalIgnoreCase));
 
     /// <summary>Bir görsele damgalanan tek bir kod/fiyat satırı. Bir görselde birden fazla
     /// Excel koduna karşılık gelen aday bulunduğunda (ör. aynı görsel birden fazla yaş/beden
@@ -72,6 +88,19 @@ public class Worker : BackgroundService
     /// alıcılara ikinci kez göndermeden.</summary>
     private sealed record PendingSend(string FilePath, string Recipient);
 
+    /// <summary>Fuzzy/AI-tahminli (IsFuzzy=true — ne OCR'ın tam string eşleşmesi ne de AI'nin
+    /// başka bir kaynakla doğrulanmış cevabı) bir görselin, müşteriye HİÇ gönderilmeden önce
+    /// KontrolBekliyor'a konurken ihtiyaç duyacağı her şeyi taşır (2026-08-28, kullanıcı isteği —
+    /// bkz. dosya başındaki "Kontrol Bekleyenler akışı" notu ve LearnedCodeCorrectionStore.cs).
+    /// Klasörün KontrolBekliyor alt dizininde "kontrol_bekliyor.json" olarak (bir dizi hâlinde)
+    /// saklanır — operatör görseli doğru kodla yeniden adlandırdığında Worker bu kaydı bulup
+    /// (marka/kur'u yeniden hesaplamaya gerek kalmadan) damgalayıp gönderebilsin diye.</summary>
+    private sealed record KontrolBekliyorItem(
+        string FileName, string GuessedCode, double Confidence, string Source, decimal GuessedPriceUsd,
+        List<string> Candidates,
+        string BrandFullName, decimal BrandNetCarpan, string BrandOnEk,
+        decimal RateValue, DateTime RateDate, string ExcelFilePath, string SenderPhone);
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var appDir = AppContext.BaseDirectory;
@@ -83,6 +112,28 @@ public class Worker : BackgroundService
         // başarısız olsa bile) klasöre "musteri_raporu.txt" olarak da yazılır (2026-08-10) — kalıcı
         // kayıt için. Yayına geçmeden önce appsettings.json'da false yapılmalı.
         var sendReportToCustomer = config["SendReportToCustomer"]?.GetValue<bool>() ?? false;
+
+        // GÖNDERİM ARALIĞI / PARTİ SOĞUTMASI (2026-08-24, gerçek vaka: Gonderim_20260824_135009_f9f3b304
+        // — 43 görsel de bot'un /internal/send endpoint'inden gerçek 200 OK aldı (TrySendAsync'in
+        // logladığı HTTP durumu, worker'ın varsaydığı bir şey değil), yani PriceBot.Worker→bot
+        // teslimatı tamamen başarılıydı; ama müşteriye fiilen sadece 28 görsel ulaştı, 29. mesajdan
+        // itibaren sessizce durdu. Worker→bot HTTP katmanında hata YOK, bu yüzden kök neden bot'un
+        // kendi WhatsApp gönderim katmanında (rate-limit/oturum/anti-spam) — ayrı bir proje, bu
+        // repoda değil, buradan kesin teşhis/DÜZELTME edilemez. Eldeki tek araç, aynı alıcıya kısa
+        // sürede çok sayıda ardışık görsel göndermenin (400ms sabit gecikmeyle 43 görsel ~17 sn'de
+        // gidiyordu) bunu tetikleme ihtimalini azaltmak: SADECE gecikmeyi (SendDelayMs) uzatmak
+        // yetmeyebilir (bazı WhatsApp otomasyon katmanları saniye başına değil, KISA PENCEREDEKİ
+        // TOPLAM mesaj sayısına göre spam/oturum koruması tetikliyor) — bu yüzden isteğe bağlı bir
+        // "parti + soğutma" da eklendi: her SendBatchSize görselden sonra normal aralığa EK olarak
+        // SendBatchCooldownMs kadar beklenir. Üçü de appsettings.json'dan rebuild gerektirmeden
+        // ayarlanabilir (OcrParallelism ile aynı desen); varsayılanlar mevcut davranışı AYNEN korur
+        // (SendDelayMs=400 eski sabit değerle birebir aynı, parti soğutması varsayılan KAPALI — hangi
+        // değerin gerçekten işe yaradığı bot tarafı teşhis edilmeden bilinemez, bu yüzden üretim
+        // davranışını sessizce değiştirmemek tercih edildi). RetryPendingSendsAsync (gecikmeli yeniden
+        // deneme turu) da aynı SendDelayMs'i kullanır, kendi sabit 400'ü vardı.
+        var sendDelayMs = config["SendDelayMs"]?.GetValue<int>() ?? 400;
+        var sendBatchSize = config["SendBatchSize"]?.GetValue<int>() ?? 0;
+        var sendBatchCooldownMs = config["SendBatchCooldownMs"]?.GetValue<int>() ?? 0;
 
         // İYİ KOMŞU AYARI (2026-08-09): sunucu paylaşımlı (SQL Server + IIS + RDP aynı makinede) ve
         // 65 görsellik gibi büyük klasörler CPU'yu üretimde canlı olarak %96-100'e çıkarabiliyor.
@@ -234,8 +285,16 @@ public class Worker : BackgroundService
             : Path.Combine(appDir, "LearnedBrandAliases.json");
         var aliasStore = new LearnedBrandAliasStore(learnedAliasPath, _logger);
 
-        _logger.LogInformation("PriceBot Worker başladı. IncomingRoot={IncomingRoot} BotSendUrl={BotSendUrl} OcrParalel={OcrParallelism} OcrCacheCapacity={OcrCacheCapacity} OcrRecycleHours={OcrRecycleHours} OcrRecycleMemoryMb={OcrRecycleMemoryMb} SendReportToCustomer={SendReportToCustomer} LearnedBrandAliasCount={LearnedBrandAliasCount}",
-            IncomingRoot, BotSendUrl, ocrParallelism, ocrCacheCapacity, ocrRecycleHours, ocrRecycleMemoryMb, sendReportToCustomer, aliasStore.Aliases.Count);
+        // Öğrenilmiş kod düzeltmeleri (2026-08-28, kullanıcı isteği — bkz.
+        // LearnedCodeCorrectionStore.cs dosya başı yorumu): aliasStore ile AYNI desen/konum.
+        var learnedCodeCorrectionPath = config["LearnedCodeCorrectionPath"]?.GetValue<string>()
+            is string configuredCorrectionPath && !string.IsNullOrWhiteSpace(configuredCorrectionPath)
+            ? configuredCorrectionPath
+            : Path.Combine(appDir, "LearnedCodeCorrections.json");
+        var codeCorrectionStore = new LearnedCodeCorrectionStore(learnedCodeCorrectionPath, _logger);
+
+        _logger.LogInformation("PriceBot Worker başladı. IncomingRoot={IncomingRoot} BotSendUrl={BotSendUrl} OcrParalel={OcrParallelism} OcrCacheCapacity={OcrCacheCapacity} OcrRecycleHours={OcrRecycleHours} OcrRecycleMemoryMb={OcrRecycleMemoryMb} SendReportToCustomer={SendReportToCustomer} SendDelayMs={SendDelayMs} SendBatchSize={SendBatchSize} SendBatchCooldownMs={SendBatchCooldownMs} LearnedBrandAliasCount={LearnedBrandAliasCount}",
+            IncomingRoot, BotSendUrl, ocrParallelism, ocrCacheCapacity, ocrRecycleHours, ocrRecycleMemoryMb, sendReportToCustomer, sendDelayMs, sendBatchSize, sendBatchCooldownMs, aliasStore.Aliases.Count);
 
         // 2026-08-09: Önceden bu kontrol SADECE dış while döngüsünün başında çalışıyordu — ama
         // aşağıdaki `foreach (var folder in readyFolders)` birikmiş çok sayıda klasörü TEK bir turda
@@ -301,16 +360,6 @@ public class Worker : BackgroundService
                     continue;
                 }
 
-                // "~$dosya.xlsx" Excel'in dosya açıkken oluşturduğu geçici kilit dosyasıdır, gerçek içerik değildir.
-                // .xls (eski Excel 97-2003 ikili format) de kabul edilir — ExcelPriceReader, ClosedXML
-                // dosyayı açamazsa (üretim vakası, 2026-08-03: müşteri .xls göndermişti) otomatik olarak
-                // ExcelDataReader'a düşer; burada sadece klasörün "hazır" sayılıp taranmaya değer olması
-                // için dosyanın var olması yeterli.
-                static IEnumerable<string> RealXlsxFiles(string dir) =>
-                    Directory.EnumerateFiles(dir)
-                        .Where(f => !Path.GetFileName(f).StartsWith("~$"))
-                        .Where(f => f.EndsWith(".xlsx", StringComparison.OrdinalIgnoreCase) || f.EndsWith(".xls", StringComparison.OrdinalIgnoreCase));
-
                 // Önce bekleyen (daha önce gönderilemeyen) gönderimleri tekrar dene — bu
                 // klasörler zaten OCR/damgalama işini tamamlamış (islendi.txt yazılmış), sadece
                 // gönderim adımı (ör. bot kapalıyken) başarısız olmuştu. OCR'ı tekrarlamadan,
@@ -324,7 +373,19 @@ public class Worker : BackgroundService
 
                 foreach (var folder in pendingSendFolders)
                 {
-                    await RetryPendingSendsAsync(http, folder, stoppingToken);
+                    await RetryPendingSendsAsync(http, folder, sendDelayMs, stoppingToken);
+                }
+
+                // KontrolBekliyor: operatörün sunucuda elle düzelttiği (görseli doğru kodla
+                // yeniden adlandırdığı) kayıtları işle (2026-08-28, kullanıcı isteği). Bekleyen
+                // gönderimlerle AYNI konumda/desende — OCR/eşleştirme zaten bitmiş, sadece
+                // operatör onayı bekleniyordu.
+                var kontrolBekliyorFolders = Directory
+                    .EnumerateDirectories(IncomingRoot, KontrolBekliyorDirName, SearchOption.AllDirectories)
+                    .ToList();
+                foreach (var kbFolder in kontrolBekliyorFolders)
+                {
+                    await ResolveKontrolBekliyorAsync(http, kbFolder, sendDelayMs, codeCorrectionStore, stoppingToken);
                 }
 
                 var readyFolders = Directory
@@ -356,6 +417,14 @@ public class Worker : BackgroundService
 
                     _logger.LogInformation("=== İşleniyor: {Folder} ===", folder);
                     string senderPhone = new DirectoryInfo(folder).Parent!.Name;
+
+                    // Yinelenen (duplicate) gönderim güvenlik ağı (2026-08-24, kullanıcı isteği —
+                    // bkz. DeduplicateFolderFiles tanımındaki ayrıntılı not): OCR/bölme/damgalamadan
+                    // ÖNCE, klasördeki BİREBİR aynı içerikli Excel/görsel kopyaları (WhatsApp'ın aynı
+                    // dosyayı iki kez teslim ettiği durumlar) temizlenir — aksi halde ör. aynı Excel
+                    // iki kez gelirse her kod İKİ Excel'de birden bulunur ve SplitMultiBrandFolder
+                    // hiçbir görseli hiçbir gruba atayamaz (bkz. [[project_duplicate_send_split_blackhole.md]]).
+                    DeduplicateFolderFiles(folder);
 
                     // Süreç değişikliği (2026-07-28): birden fazla markanın fotoğraf + Excel'i
                     // aynı gönderimde gelebiliyor. Böyle klasörler doğrudan işlenmez; önce marka
@@ -420,6 +489,9 @@ public class Worker : BackgroundService
                     Directory.CreateDirectory(outputDir);
                     var stampedFiles = new List<string>();
                     var imageResults = new List<ImageResult>();
+                    // Fuzzy/AI-tahminli eşleşmeler (2026-08-28, kullanıcı isteği) — Aşama 3.3'te
+                    // doldurulur, döngü bitince KontrolBekliyor manifestine yazılır.
+                    var kontrolBekliyorItems = new List<KontrolBekliyorItem>();
 
                     var allFiles = Directory.EnumerateFiles(folder)
                         .Where(f => SupportedExtensions.Contains(Path.GetExtension(f)))
@@ -540,11 +612,28 @@ public class Worker : BackgroundService
                     // StampedCode). MatchExact zaten sadece Excel'de gerçekten var olan kodları
                     // döndürdüğü için (extract edilen rastgele bir rakam dizisi değil), listedeki
                     // her aday güvenilir bir Excel eşleşmesidir.
+                    // 2026-08-28 (kullanıcı isteği, gerçek vaka: Gonderim_20260826_160228_1bd6a08b,
+                    // gorsel_..._6e6383.jpg): OCR'ın KENDİ ürettiği tek fuzzy adayı (Levenshtein-1,
+                    // Source=="OCR" — ComputeFuzzyCandidates'in singleton-kabul yolu, bkz.
+                    // PaddleScanOcr.cs FindProductCodes) artık TEK BAŞINA yeterli sayılmıyor: bu
+                    // partide güven 34/41/44 gibi düşük güvenli 3 böyle tahminin ÜÇÜ DE yanlış
+                    // çıkmıştı. Böyle bir görsel `chosen`'a HEMEN eklenmez — Aşama 2.5'e (aşağıda)
+                    // bırakılır, orada bağımsız bir AI sağlayıcısı AYNI kodu doğrularsa "chosen"a
+                    // yükseltilir, doğrulamazsa/doğrulayamazsa yine `chosen`a (ama hâlâ IsFuzzy=true
+                    // olarak) düşer — Aşama 3.3 IsFuzzy=true olan HİÇBİR sonucu artık müşteriye
+                    // göndermez, KontrolBekliyor'a yönlendirir (bkz. o bölümdeki not).
                     var chosen = new Dictionary<int, List<CodeMatch>>();
+                    var ocrFuzzyPending = new List<int>();
                     for (int idx = 0; idx < scans.Count; idx++)
                     {
-                        if (scans[idx].Scan.Matches.Count > 0)
-                            chosen[idx] = scans[idx].Scan.Matches;
+                        var matches = scans[idx].Scan.Matches;
+                        if (matches.Count == 0) continue;
+                        if (matches.Count == 1 && matches[0].IsFuzzy && matches[0].Source == "OCR")
+                        {
+                            ocrFuzzyPending.Add(idx);
+                            continue;
+                        }
+                        chosen[idx] = matches;
                     }
 
                     // Klasör başına, SAĞLAYICI BAŞINA devre kesici (2026-08-10, çoklu-sağlayıcıya
@@ -558,6 +647,57 @@ public class Worker : BackgroundService
                     // kalıcı bir hatada dönüyor.
                     var codeClassifierHealthy = new bool[codeClassifiers.Count];
                     Array.Fill(codeClassifierHealthy, true);
+
+                    // Aşama 2.5 (2026-08-28, kullanıcı isteği): ocrFuzzyPending'deki her görsel için
+                    // AI sağlayıcılarına (aynı codeClassifierHealthy devre kesiciyle, sırayla) "bu
+                    // görselin kodu ne?" diye sorulur. AI OCR'ın tahminiyle (ocrGuess.Code) AYNI kodu
+                    // dönerse bağımsız bir ikinci kanıt sayılır ve normal (yüksek güvenli) akışa
+                    // yükseltilir. Farklı bir kod dönerse, BULUNAMADI derse ya da hiçbir sağlayıcı
+                    // cevap veremezse OCR'ın tek başına tahminine güvenilmez — yine de `chosen`a
+                    // eklenir (Aşama 3.1'in bu görseli SIFIRDAN, karşılaştırmasız bir "kod bulunamadı"
+                    // aramasıyla TEKRAR ele alıp gereksiz ek API çağrısı yapmasını önlemek için) ama
+                    // IsFuzzy=true olarak KALIR — Aşama 3.3 bu görseli KontrolBekliyor'a yönlendirir.
+                    foreach (var idx in ocrFuzzyPending)
+                    {
+                        var ocrGuess = scans[idx].Scan.Matches[0];
+                        var (file, _) = scans[idx];
+                        var fileName = Path.GetFileName(file);
+                        bool confirmed = false;
+
+                        for (int ci = 0; ci < codeClassifiers.Count && !confirmed; ci++)
+                        {
+                            if (!codeClassifierHealthy[ci]) continue;
+
+                            var (source, classifier) = codeClassifiers[ci];
+                            var (code, apiFailed, retryAfter) = await classifier.ClassifyCodeAsync(file, excelCodes, stoppingToken);
+                            if (apiFailed)
+                            {
+                                codeClassifierHealthy[ci] = false;
+                                _logger.LogWarning("Klasör {Folder}: {Source} API hatası verdi, bu klasördeki kalan görseller için bu sağlayıcı atlanacak.", folder, source);
+                                continue;
+                            }
+                            if (retryAfter is not null) continue; // Burada ayrıca ertelemiyoruz — KontrolBekliyor zaten güvenli bir düşüş.
+                            if (code is not null && string.Equals(code, ocrGuess.Code, StringComparison.OrdinalIgnoreCase))
+                            {
+                                chosen[idx] = [ocrGuess with
+                                {
+                                    IsFuzzy = false,
+                                    Confidence = Math.Max(ocrGuess.Confidence, 90f),
+                                    Source = $"OCR-fuzzy+{source} doğrulandı",
+                                }];
+                                confirmed = true;
+                                _logger.LogInformation("'{File}': OCR-fuzzy tahmini ({Code}) {Source} tarafından doğrulandı, güven yükseltildi.",
+                                    fileName, ocrGuess.Code, source);
+                            }
+                        }
+
+                        if (!confirmed)
+                        {
+                            chosen[idx] = [ocrGuess];
+                            _logger.LogWarning("'{File}': OCR-fuzzy tahmini ({Code}, güven {Confidence:N0}) hiçbir AI sağlayıcısıyla doğrulanamadı — KontrolBekliyor'a yönlendirilecek.",
+                                fileName, ocrGuess.Code, ocrGuess.Confidence);
+                        }
+                    }
 
                     // GÜVENLİK AĞI (2026-08-19, gerçek vaka: Gonderim_20260819_121909_286105ab,
                     // dosyalar "MODEL_19942_...jpg", "MODEL_19944_...jpg", "MODEL_19945_...jpg"):
@@ -715,6 +855,80 @@ public class Worker : BackgroundService
                         }).ToList();
                         var best = stampedCodes[0];
 
+                        // Öğrenilmiş düzeltme (2026-08-28, kullanıcı isteği — bkz.
+                        // LearnedCodeCorrectionStore.cs): bu marka için bu kod DAHA ÖNCE operatör
+                        // tarafından yanlış bulunup düzeltilmişse VE öğrenilen doğru kod bu görselin
+                        // KENDİ OCR adaylarında da geçiyorsa, KontrolBekliyor'a düşmeden doğrudan
+                        // uygulanır — aynı yanlış-kod tuzağına (ör. "0050", bu partide İKİ farklı
+                        // görsele yanlışlıkla bağlanmıştı) bir daha operatör onayı istemeden düşülür.
+                        // Kod farklı görsellerde farklı gerçek kodlara denk gelebildiği için (yukarıdaki
+                        // "0050" örneği) öğrenilen kod, İLGİSİZ bir görsele körü körüne uygulanmasın
+                        // diye bu görselin adayları arasında geçiyor olması ŞART koşulur. SADECE
+                        // tek-kodlu görsellerde uygulanır — çok-kodlu bir görselde stampedCodes[0]'ı
+                        // (best) değiştirmek diğer kodları (ör. 2. bir yaş/beden grubu) sessizce
+                        // LİSTEDEN DÜŞÜRÜR; bu nadir kesişim yerine güvenli tarafta kalınıp normal
+                        // KontrolBekliyor akışına bırakılır.
+                        if (best.IsFuzzy && stampedCodes.Count == 1)
+                        {
+                            var learned = codeCorrectionStore.TryGetLearnedReplacement(brand.FullName, best.Code);
+                            if (learned is not null && excelPrices.TryGetValue(learned, out var learnedPriceExcel)
+                                && scan.Candidates.Contains(learned, StringComparer.OrdinalIgnoreCase))
+                            {
+                                var learnedPriceTry = learnedPriceExcel * brand.NetCarpan;
+                                var learnedPriceUsd = learnedPriceTry / rate.Value.Rate;
+                                stampedCodes = [new StampedCode(learned, 95f, IsFuzzy: false, learnedPriceExcel, learnedPriceTry, learnedPriceUsd,
+                                    Source: $"öğrenilmiş düzeltme (önceki yanlış tahmin: {best.Code})")];
+                                best = stampedCodes[0];
+                                _logger.LogInformation(
+                                    "'{File}': daha önce öğrenilmiş bir düzeltme uygulandı — '{Brand}' markasında '{Wrong}' yerine '{Confirmed}'.",
+                                    fileName, brand.FullName, matches[0].Code, learned);
+                            }
+                        }
+
+                        // KontrolBekliyor (2026-08-28, kullanıcı isteği, gerçek vaka:
+                        // Gonderim_20260826_160228_1bd6a08b — kod 26206/güven 44 ile YANLIŞLIKLA
+                        // damgalanan bir görsel $16,56 ile müşteriye gitmişti, doğrusu 24113/$3,94'tü;
+                        // aynı partide 10 fuzzy sonuçtan 6'sı yanlış çıkmıştı): IsFuzzy=true olan HİÇBİR
+                        // sonuç (OCR'ın kendi tek-aday fuzzy tahmini AI ile doğrulanamadıysa, ya da
+                        // AI görü-tespiti fallback'i — kaynağı fark etmez) artık müşteriye
+                        // damgalanıp GÖNDERİLMİYOR. Orijinal (damgasız) görsel KontrolBekliyor alt
+                        // klasörüne kopyalanır; operatör sunucuda üründeki gerçek kodu görüp dosyayı
+                        // "<doğru_kod>_<orijinal_ad>" olarak yeniden adlandırınca
+                        // ResolveKontrolBekliyorAsync bir sonraki turda damgalayıp gönderir VE
+                        // düzeltmeyi LearnedCodeCorrectionStore'a kalıcı olarak öğretir. Birden fazla
+                        // kod içeren görsellerde (StampedCode listesi >1) TEK bir kod bile fuzzy ise
+                        // görselin TAMAMI KontrolBekliyor'a gider — kısmi damgalama bilinçli olarak
+                        // desteklenmiyor (nadir bir kesişim, gereksiz karmaşıklık).
+                        if (stampedCodes.Any(s => s.IsFuzzy))
+                        {
+                            // Çok-kodlu bir görselde fuzzy olan "best" (stampedCodes[0]) DEĞİL de
+                            // başka bir kod olabilir — operatöre HANGİ kodun şüpheli olduğunu doğru
+                            // göstermek için (best değil) gerçekten fuzzy olan kod seçilir.
+                            var uncertain = stampedCodes.First(s => s.IsFuzzy);
+                            try
+                            {
+                                var kontrolDir = Path.Combine(folder, KontrolBekliyorDirName);
+                                Directory.CreateDirectory(kontrolDir);
+                                File.Copy(file, Path.Combine(kontrolDir, fileName), overwrite: true);
+                                kontrolBekliyorItems.Add(new KontrolBekliyorItem(
+                                    fileName, uncertain.Code, uncertain.Confidence, uncertain.Source, uncertain.PriceUsd, scan.Candidates,
+                                    brand.FullName, brand.NetCarpan, brand.OnEk, rate.Value.Rate, rate.Value.RateDate,
+                                    excelFile, senderPhone));
+                                _logger.LogWarning(
+                                    "'{File}' -> KONTROL BEKLİYOR (fuzzy eşleşme, müşteriye GÖNDERİLMEDİ): sistem tahmini kod {Code} (güven {Confidence:N0}, kaynak {Source}) -> {Dir}",
+                                    fileName, uncertain.Code, uncertain.Confidence, uncertain.Source, kontrolDir);
+                                imageResults.Add(new ImageResult(fileName, false, null, null, scan.Matches.Count, null, null, null, null,
+                                    "Kontrol bekliyor — eşleşme kesin değil, otomatik gönderilmedi. Detay için sunucudaki KontrolBekliyor klasörüne bakınız."));
+                            }
+                            catch (Exception ex)
+                            {
+                                _logger.LogError(ex, "HATA (KontrolBekliyor'a kopyalanamadı): {File}", fileName);
+                                imageResults.Add(new ImageResult(fileName, false, null, null, scan.Matches.Count, null, null, null, null,
+                                    $"Kontrol bekliyor kopyalama hatası: {ex.Message}"));
+                            }
+                            continue;
+                        }
+
                         if (stampedCodes.Count > 1)
                         {
                             _logger.LogInformation("'{File}' içinde {Count} farklı kod bulundu, hepsi damgalanıyor: {Codes}",
@@ -728,21 +942,7 @@ public class Worker : BackgroundService
                             stampedFiles.Add(stamped);
                             imageResults.Add(new ImageResult(fileName, true, best.Code, best.Confidence, scan.Matches.Count,
                                 best.PriceExcel, best.PriceTry, best.PriceUsd, Path.GetFileName(stamped), null, best.IsFuzzy, stampedCodes));
-                            if (best.IsFuzzy && best.Source != "OCR")
-                            {
-                                // Gemini görü tespiti (2026-08-10): OCR'ın Levenshtein-tabanlı kısmi
-                                // güven skoruyla KARIŞTIRILMASIN diye ayrı bir log mesajı — "YAKLAŞIK
-                                // (fuzzy)" ifadesi burada yanıltıcı olurdu (enum zorlaması sayesinde
-                                // Gemini'nin cevabı "kesin" bir seçim, kısmi bir okuma değil).
-                                _logger.LogWarning("'{File}' -> {Source}, KONTROL ÖNERİLİR: kod {Code} -> {PriceExcel:N2} × {Carpan} = {PriceTry:N2} TRY ({PriceUsd:N2} USD) -> {Output}",
-                                    fileName, best.Source, best.Code, best.PriceExcel, brand.NetCarpan, best.PriceTry, best.PriceUsd, Path.GetFileName(stamped));
-                            }
-                            else if (best.IsFuzzy)
-                            {
-                                _logger.LogWarning("'{File}' -> YAKLAŞIK (fuzzy) eşleşme, KONTROL ÖNERİLİR: kod {Code} (güven {Confidence:N0}) -> {PriceExcel:N2} × {Carpan} = {PriceTry:N2} TRY ({PriceUsd:N2} USD) -> {Output}",
-                                    fileName, best.Code, best.Confidence, best.PriceExcel, brand.NetCarpan, best.PriceTry, best.PriceUsd, Path.GetFileName(stamped));
-                            }
-                            else if (stampedCodes.Count == 1)
+                            if (stampedCodes.Count == 1)
                             {
                                 _logger.LogInformation("Eşleşti: {File} -> kod {Code} (güven {Confidence:N0}) -> {PriceExcel:N2} × {Carpan} = {PriceTry:N2} TRY ({PriceUsd:N2} USD) -> {Output}",
                                     fileName, best.Code, best.Confidence, best.PriceExcel, brand.NetCarpan, best.PriceTry, best.PriceUsd, Path.GetFileName(stamped));
@@ -756,12 +956,29 @@ public class Worker : BackgroundService
                         }
                     }
 
+                    // KontrolBekliyor manifesti (2026-08-28): bu turda beklemeye alınan tüm görseller
+                    // için, ResolveKontrolBekliyorAsync'in operatör onayında ihtiyaç duyacağı
+                    // marka/kur/Excel bilgisini taşıyan TEK bir JSON dizisi + operatörün hızlı gözden
+                    // geçirmesi için okunabilir bir özet yazılır. Var olan bir manifestin üstüne
+                    // yazmak yerine EKLENİR (bu klasör daha önce de kısmen çözülmüş olabilir —
+                    // pratikte olmaz ama savunmacı).
+                    if (kontrolBekliyorItems.Count > 0)
+                    {
+                        WriteKontrolBekliyorManifest(folder, kontrolBekliyorItems);
+                    }
+
                     // 2026-08-08: ExtraRecipients kaldırıldı (kullanılmıyordu) — alıcı artık her zaman
                     // sadece gönderen numara.
                     var recipients = new List<string> { senderPhone };
                     var sendResults = new List<SendResult>();
                     var stillPending = new List<PendingSend>();
 
+                    if (stampedFiles.Count > 20)
+                        _logger.LogWarning(
+                            "Klasör {Folder}: {Count} görsel tek alıcıya art arda gönderilecek — bot'un kendi WhatsApp katmanında rate-limit/anti-spam tetiklenirse (bkz. 2026-08-24 SendDelayMs/SendBatchSize notu) worker→bot HTTP'si yine de 200 dönebilir, gerçek teslimatı bot logundan doğrulayın.",
+                            folder, stampedFiles.Count);
+
+                    var sendCount = 0;
                     foreach (var file in stampedFiles)
                     {
                         foreach (var recipient in recipients)
@@ -769,7 +986,13 @@ public class Worker : BackgroundService
                             var result = await TrySendAsync(http, file, recipient, stoppingToken);
                             sendResults.Add(result);
                             if (!result.Success) stillPending.Add(new PendingSend(file, recipient));
-                            await Task.Delay(400, stoppingToken);
+                            sendCount++;
+                            await Task.Delay(sendDelayMs, stoppingToken);
+                            if (sendBatchSize > 0 && sendBatchCooldownMs > 0 && sendCount % sendBatchSize == 0)
+                            {
+                                _logger.LogInformation("Klasör {Folder}: {Count} görsel gönderildi, parti soğutması için ek {Cooldown} ms bekleniyor.", folder, sendCount, sendBatchCooldownMs);
+                                await Task.Delay(sendBatchCooldownMs, stoppingToken);
+                            }
                         }
                     }
 
@@ -797,19 +1020,31 @@ public class Worker : BackgroundService
                     // (ör. dosya o an kilitli) başarısız olursa bu turda kurtarılamaz (kalan artık
                     // risk, kabul edildi) — ama en azından loglanır, mevcut davranışta olduğu gibi
                     // sessizce kaybolmaz.
+                    //
+                    // GENİŞLETME (2026-08-24, gerçek vaka: Gonderim_20260824_135009_f9f3b304 — 48
+                    // fiziksel görselden 5'i raporda hiç görünmedi): yukarıdaki fix'in koşulu
+                    // SADECE `lateExcelFiles.Count > 0` idi — yani müşteri işlem sürerken YENİ Excel
+                    // GÖNDERMEDEN sadece fazladan görsel bıraktıysa (bu vakada olan tam olarak buydu)
+                    // güvenlik ağı hiç tetiklenmiyor, o görseller sessizce kayboluyordu (ilk sürümün
+                    // kaçırdığı durum). Artık `lateImageFiles` KOŞULSUZ hesaplanıyor ve tetikleyici
+                    // `lateExcelFiles.Count > 0 || lateImageFiles.Count > 0`. Yeni Excel yoksa
+                    // continuation klasörünün kendi fiyat listesi olmaz — "hazır klasör" şartı en az
+                    // bir .xlsx istediği için (yukarıdaki tarama mantığı) o klasör sonsuza dek
+                    // işlenmeden kalırdı; bu yüzden bu durumda orijinal Excel'in (`excelFile`, bu
+                    // klasörde KALIYOR, taşınmıyor) bir KOPYASI continuation'a eklenir.
                     try
                     {
                         var lateExcelFiles = RealXlsxFiles(folder)
                             .Where(f => !excelFiles.Contains(f, StringComparer.OrdinalIgnoreCase))
                             .ToList();
-                        if (lateExcelFiles.Count > 0)
-                        {
-                            var handledFileNames = new HashSet<string>(allFiles.Select(f => Path.GetFileName(f)!), StringComparer.OrdinalIgnoreCase);
-                            var lateImageFiles = Directory.EnumerateFiles(folder)
-                                .Where(f => SupportedExtensions.Contains(Path.GetExtension(f)))
-                                .Where(f => !handledFileNames.Contains(Path.GetFileName(f)))
-                                .ToList();
+                        var handledFileNames = new HashSet<string>(allFiles.Select(f => Path.GetFileName(f)!), StringComparer.OrdinalIgnoreCase);
+                        var lateImageFiles = Directory.EnumerateFiles(folder)
+                            .Where(f => SupportedExtensions.Contains(Path.GetExtension(f)))
+                            .Where(f => !handledFileNames.Contains(Path.GetFileName(f)))
+                            .ToList();
 
+                        if (lateExcelFiles.Count > 0 || lateImageFiles.Count > 0)
+                        {
                             var earliestLateWrite = lateExcelFiles.Concat(lateImageFiles)
                                 .Select(File.GetLastWriteTime)
                                 .DefaultIfEmpty(DateTime.Now)
@@ -821,10 +1056,22 @@ public class Worker : BackgroundService
                             foreach (var f in lateExcelFiles.Concat(lateImageFiles))
                                 File.Move(f, Path.Combine(continuationFolder, Path.GetFileName(f)));
 
+                            var copiedExcelNote = "";
+                            if (lateExcelFiles.Count == 0)
+                            {
+                                // Yeni Excel gelmedi — sadece görsel geldi, aynı fiyat listesiyle
+                                // devam edebilmesi için orijinal Excel'in kopyası ekleniyor (bkz.
+                                // yukarıdaki 2026-08-24 notu).
+                                var copiedExcelPath = Path.Combine(continuationFolder, Path.GetFileName(excelFile));
+                                File.Copy(excelFile, copiedExcelPath, overwrite: true);
+                                copiedExcelNote = $" Yeni Excel gelmediği için orijinal fiyat listesinin ('{Path.GetFileName(excelFile)}') bir kopyası eklendi.";
+                            }
+
                             File.WriteAllText(Path.Combine(continuationFolder, "devam_kaynak_klasoru.txt"),
                                 $"Bu klasör, '{Path.GetFileName(folder)}' klasörü işlenirken (OCR/damgalama sürerken) o klasöre " +
                                 $"sonradan düşen {lateExcelFiles.Count} Excel + {lateImageFiles.Count} görsel için otomatik oluşturuldu " +
-                                $"(bkz. Worker.cs, 2026-08-19 güvenlik ağı). Zaman: {DateTime.Now:yyyy-MM-dd HH:mm:ss}.{Environment.NewLine}",
+                                $"(bkz. Worker.cs, 2026-08-19 güvenlik ağı + 2026-08-24 genişletmesi).{copiedExcelNote} " +
+                                $"Zaman: {DateTime.Now:yyyy-MM-dd HH:mm:ss}.{Environment.NewLine}",
                                 Encoding.UTF8);
 
                             _logger.LogWarning(
@@ -1366,7 +1613,7 @@ public class Worker : BackgroundService
     /// damgalama işini TEKRARLAMADAN yeniden dener — çünkü bu klasör için islendi.txt zaten
     /// yazılmış, damgalı dosyalar Islenmis/ altında hazır duruyor. Hâlâ başarısız olanlar dosyada
     /// kalır, tamamı başarılı olursa dosya silinir.</summary>
-    private async Task RetryPendingSendsAsync(HttpClient http, string folder, CancellationToken ct)
+    private async Task RetryPendingSendsAsync(HttpClient http, string folder, int sendDelayMs, CancellationToken ct)
     {
         var path = PendingSendsPath(folder);
         List<PendingSend>? pending;
@@ -1392,7 +1639,7 @@ public class Worker : BackgroundService
             else
                 stillPending.Add(item);
 
-            await Task.Delay(400, ct);
+            await Task.Delay(sendDelayMs, ct);
         }
 
         if (stillPending.Count == 0)
@@ -1403,19 +1650,27 @@ public class Worker : BackgroundService
         else WritePendingSends(folder, stillPending);
     }
 
-    /// <summary>Klasör "tamamlanmış" ise (islendi.txt var VE gonderim_bekleyen.json yok — yani
-    /// hem OCR/damgalama hem de tüm gönderimler bitmiş) IncomingRoot dışına, ArchiveRoot altına
-    /// aynı telefon alt klasör yapısı korunarak taşır (bkz. ArchiveRoot yorumu). Taşıma başarısız
-    /// olursa (ör. dosya o an kilitliyse) klasör olduğu yerde kalır — işlevsel bir sorun değil,
-    /// islendi.txt zaten yeniden işlenmeyi engelliyor; sadece bir sonraki tarama biraz daha yavaş
-    /// olur. Bu metodun kendisi tarama yapmaz, sadece işi biten TEK bir klasörü taşır — çağıran,
-    /// bir klasörün işinin (gönderimler dahil) o an gerçekten bittiği noktalarda çağırmalı.</summary>
+    /// <summary>Klasör "tamamlanmış" ise (islendi.txt var, gonderim_bekleyen.json yok VE
+    /// KontrolBekliyor'da bekleyen bir görsel kalmamış — yani hem OCR/damgalama hem tüm
+    /// gönderimler hem de operatör onayı gereken kayıtlar bitmiş) IncomingRoot dışına, ArchiveRoot
+    /// altına aynı telefon alt klasör yapısı korunarak taşır (bkz. ArchiveRoot yorumu). Taşıma
+    /// başarısız olursa (ör. dosya o an kilitliyse) klasör olduğu yerde kalır — işlevsel bir sorun
+    /// değil, islendi.txt zaten yeniden işlenmeyi engelliyor; sadece bir sonraki tarama biraz daha
+    /// yavaş olur. Bu metodun kendisi tarama yapmaz, sadece işi biten TEK bir klasörü taşır —
+    /// çağıran, bir klasörün işinin (gönderimler dahil) o an gerçekten bittiği noktalarda
+    /// çağırmalı.</summary>
     private void ArchiveIfComplete(string folder)
     {
         try
         {
             if (!File.Exists(Path.Combine(folder, "islendi.txt"))) return;
             if (File.Exists(PendingSendsPath(folder))) return;
+            // KontrolBekliyor (2026-08-28, kullanıcı isteği): operatör henüz düzeltmediği
+            // görseller varken klasör arşive taşınmaz — ResolveKontrolBekliyorAsync onları hâlâ
+            // IncomingRoot altında (SearchOption.AllDirectories ile) bulabilmeli.
+            var kontrolDir = Path.Combine(folder, KontrolBekliyorDirName);
+            if (Directory.Exists(kontrolDir) && Directory.EnumerateFiles(kontrolDir).Any(f => !f.EndsWith(".json", StringComparison.OrdinalIgnoreCase) && !f.EndsWith(".txt", StringComparison.OrdinalIgnoreCase)))
+                return;
 
             var phone = new DirectoryInfo(folder).Parent!.Name;
             var target = Path.Combine(ArchiveRoot, phone, Path.GetFileName(folder));
@@ -1433,6 +1688,224 @@ public class Worker : BackgroundService
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Klasör {Folder} arşivlenemedi (IncomingRoot'ta kalacak, işlevsel bir sorun değil).", folder);
+        }
+    }
+
+    /// <summary>Aşama 3.3'te KontrolBekliyor'a düşen görseller için TEK bir JSON dizisi
+    /// ("kontrol_bekliyor.json" — ResolveKontrolBekliyorAsync'in makine tarafından okuduğu kaynak)
+    /// ve operatörün sunucuda hızlıca gözden geçirmesi için bir metin özeti
+    /// ("kontrol_bekliyor.txt") yazar (2026-08-28, kullanıcı isteği). Var olan manifestteki
+    /// kayıtlar KORUNUR, aynı dosya adına sahip yeni bir kayıt eskisinin üzerine yazılır — bu
+    /// klasör önceki bir turdan beri zaten bekleyen kayıtları kaybetmeden çağrılabilir.</summary>
+    private static void WriteKontrolBekliyorManifest(string folder, List<KontrolBekliyorItem> newItems)
+    {
+        var kontrolDir = Path.Combine(folder, KontrolBekliyorDirName);
+        var manifestPath = Path.Combine(kontrolDir, "kontrol_bekliyor.json");
+
+        var existing = new List<KontrolBekliyorItem>();
+        if (File.Exists(manifestPath))
+        {
+            try
+            {
+                existing = JsonSerializer.Deserialize<List<KontrolBekliyorItem>>(File.ReadAllText(manifestPath, Encoding.UTF8)) ?? [];
+            }
+            catch
+            {
+                // Bozuk manifest — sıfırdan başlanır (bu turun yeni kayıtlarıyla üzerine yazılır);
+                // en kötü ihtimalle önceki bir turdan kalan, henüz çözülmemiş birkaç kayıt metin
+                // özetinden görünmez olur ama dosyaların kendisi KontrolBekliyor'da durmaya devam
+                // eder, kaybolmaz.
+            }
+        }
+
+        var merged = existing
+            .Where(e => !newItems.Any(n => string.Equals(n.FileName, e.FileName, StringComparison.OrdinalIgnoreCase)))
+            .Concat(newItems)
+            .ToList();
+
+        WriteKontrolBekliyorManifestExact(folder, merged);
+    }
+
+    /// <summary>WriteKontrolBekliyorManifest'in (birleştirme yapan) ve
+    /// ResolveKontrolBekliyorAsync'in (kalan kayıtları OLDUĞU GİBİ yazan) ORTAK son adımı —
+    /// json + txt'yi verilen listeyle (birleştirmeden) yazar.</summary>
+    private static void WriteKontrolBekliyorManifestExact(string folder, List<KontrolBekliyorItem> items)
+    {
+        var kontrolDir = Path.Combine(folder, KontrolBekliyorDirName);
+        Directory.CreateDirectory(kontrolDir);
+        var manifestPath = Path.Combine(kontrolDir, "kontrol_bekliyor.json");
+        var merged = items;
+
+        var tmpPath = manifestPath + ".tmp";
+        File.WriteAllText(tmpPath, JsonSerializer.Serialize(merged, new JsonSerializerOptions { WriteIndented = true }), Encoding.UTF8);
+        File.Move(tmpPath, manifestPath, overwrite: true);
+
+        var sb = new StringBuilder();
+        sb.AppendLine("=== PriceBot Kontrol Bekleyenler ===");
+        sb.AppendLine($"Klasör: {Path.GetFileName(folder)}");
+        sb.AppendLine($"Son güncelleme: {DateTime.Now:yyyy-MM-dd HH:mm:ss}  |  Bekleyen: {merged.Count}");
+        if (merged.Count > 0)
+            sb.AppendLine($"Marka: {merged[0].BrandFullName}  |  Kur: 1 USD = {merged[0].RateValue} TRY");
+        sb.AppendLine();
+        sb.AppendLine("Nasıl çözülür: bu klasördeki görsele bakıp üründe GERÇEKTE yazan kodu görün,");
+        sb.AppendLine("sonra dosyayı '<doğru_kod>_<orijinal_dosya_adı>' olarak yeniden adlandırın (sistem");
+        sb.AppendLine("tahmini zaten doğruysa bile aynı kodu önek olarak eklemeniz yeterli) — worker bir");
+        sb.AppendLine("sonraki turda otomatik damgalayıp gönderir ve düzeltmeyi kalıcı olarak öğrenir.");
+        sb.AppendLine();
+        foreach (var item in merged)
+        {
+            sb.AppendLine($"- {item.FileName}");
+            sb.AppendLine($"    sistem tahmini: kod {item.GuessedCode} -> ${item.GuessedPriceUsd:N2} (güven {item.Confidence:N0}, kaynak {item.Source})");
+            if (item.Candidates.Count > 0)
+                sb.AppendLine($"    OCR adayları: {string.Join(", ", item.Candidates)}");
+        }
+        File.WriteAllText(Path.Combine(kontrolDir, "kontrol_bekliyor.txt"), sb.ToString(), Encoding.UTF8);
+    }
+
+    /// <summary>Operatörün sunucuda KontrolBekliyor'daki bir görseli "&lt;doğru_kod&gt;_&lt;orijinal_ad&gt;"
+    /// olarak yeniden adlandırmasıyla verdiği düzeltmeleri işler (2026-08-28, kullanıcı isteği).
+    /// <paramref name="kontrolDir"/> bir Gonderim_* klasörünün KontrolBekliyor alt dizinidir.
+    /// Bekleyen gönderimlerle (RetryPendingSendsAsync) AYNI konumda çağrılır: OCR/eşleştirme zaten
+    /// bitmiş, sadece operatör onayı bekleniyordu.</summary>
+    private async Task ResolveKontrolBekliyorAsync(
+        HttpClient http, string kontrolDir, int sendDelayMs, LearnedCodeCorrectionStore codeCorrectionStore, CancellationToken ct)
+    {
+        var manifestPath = Path.Combine(kontrolDir, "kontrol_bekliyor.json");
+        if (!File.Exists(manifestPath)) return; // Manifestsiz bir KontrolBekliyor klasörü olamaz — savunmacı.
+
+        List<KontrolBekliyorItem>? manifest;
+        try
+        {
+            manifest = JsonSerializer.Deserialize<List<KontrolBekliyorItem>>(File.ReadAllText(manifestPath, Encoding.UTF8));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "'{Path}' okunamadı, bu turda KontrolBekliyor işlenemedi.", manifestPath);
+            return;
+        }
+        if (manifest is null || manifest.Count == 0) return;
+
+        var gonderimFolder = Directory.GetParent(kontrolDir)!.FullName;
+        var knownFileNames = manifest.Select(m => m.FileName).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        // Operatörün yeniden adlandırdığı dosyalar: adı manifestteki ORİJİNAL adlardan biriyle
+        // BİREBİR eşleşmeyen (yani hâlâ dokunulmamış "gorsel_..." hâlinde olmayan) her dosya bir
+        // düzeltme adayıdır. Hangi manifest kaydına ait olduğu, yeni adın "_<orijinal_ad>" ile
+        // BİTMESİYLE (sonek eşleşmesi) belirlenir — orijinal dosya adları da "_" içerdiği için
+        // (ör. "gorsel_20260826_...") baştan bölme GÜVENİLİR DEĞİLDİR, bu yüzden sonek eşleşmesi
+        // kullanılır.
+        var candidateFiles = Directory.EnumerateFiles(kontrolDir)
+            .Where(f => !f.EndsWith(".json", StringComparison.OrdinalIgnoreCase) && !f.EndsWith(".txt", StringComparison.OrdinalIgnoreCase))
+            .Where(f => !knownFileNames.Contains(Path.GetFileName(f)))
+            .ToList();
+        if (candidateFiles.Count == 0) return;
+
+        var remainingManifest = new List<KontrolBekliyorItem>(manifest);
+        var resolvedCount = 0;
+        var outputDir = Path.Combine(gonderimFolder, "Islenmis");
+        Directory.CreateDirectory(outputDir);
+
+        foreach (var file in candidateFiles)
+        {
+            var newName = Path.GetFileName(file);
+            var entry = manifest.FirstOrDefault(m => newName.EndsWith("_" + m.FileName, StringComparison.OrdinalIgnoreCase));
+            if (entry is null)
+            {
+                _logger.LogWarning(
+                    "KontrolBekliyor: '{File}' hiçbir manifest kaydının '_<orijinal_ad>' sonekiyle eşleşmiyor — beklenen biçim '<doğru_kod>_<orijinal_dosya_adı>'. Dosya olduğu gibi bırakıldı.",
+                    newName);
+                continue;
+            }
+
+            var confirmedCode = newName[..^("_" + entry.FileName).Length];
+            if (string.IsNullOrWhiteSpace(confirmedCode))
+            {
+                _logger.LogWarning("KontrolBekliyor: '{File}' için kod öneki boş görünüyor, atlandı.", newName);
+                continue;
+            }
+
+            Dictionary<string, decimal> excelPrices;
+            try
+            {
+                excelPrices = ExcelPriceReader.LoadPricesFromExcel(entry.ExcelFilePath);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "KontrolBekliyor: '{File}' için Excel ('{Excel}') okunamadı, bu turda atlandı.", newName, entry.ExcelFilePath);
+                continue;
+            }
+            if (!excelPrices.TryGetValue(confirmedCode, out var priceExcel))
+            {
+                _logger.LogWarning(
+                    "KontrolBekliyor: '{File}' -> '{Code}' Excel'de bulunamadı ('{Excel}') — kod yanlış yazılmış olabilir, dosya KontrolBekliyor'da bırakıldı, tekrar yeniden adlandırılabilir.",
+                    newName, confirmedCode, Path.GetFileName(entry.ExcelFilePath));
+                continue;
+            }
+
+            var priceTry = priceExcel * entry.BrandNetCarpan;
+            var priceUsd = priceTry / entry.RateValue;
+
+            try
+            {
+                var stamped = PriceStamper.Stamp(file, outputDir, priceUsd);
+                var sendResult = await TrySendAsync(http, stamped, entry.SenderPhone, ct);
+                if (!sendResult.Success)
+                {
+                    var pendingPath = PendingSendsPath(gonderimFolder);
+                    var stillPending = new List<PendingSend>();
+                    if (File.Exists(pendingPath))
+                    {
+                        try { stillPending = JsonSerializer.Deserialize<List<PendingSend>>(File.ReadAllText(pendingPath)) ?? []; }
+                        catch { /* bozuk dosya — sıfırdan başlanır */ }
+                    }
+                    stillPending.Add(new PendingSend(stamped, entry.SenderPhone));
+                    WritePendingSends(gonderimFolder, stillPending);
+                    _logger.LogWarning("KontrolBekliyor: '{File}' damgalandı ama gönderilemedi — 'gonderim_bekleyen.json'a eklendi, bir sonraki turda tekrar denenecek.", newName);
+                }
+                else
+                {
+                    _logger.LogInformation("KontrolBekliyor çözüldü: '{File}' -> kod {Code} -> {PriceUsd:N2} USD -> gönderildi.", newName, confirmedCode, priceUsd);
+                }
+
+                // Öğrenme (2026-08-28): operatörün verdiği kod, sistemin ilk tahmininden FARKLIYSA
+                // (Learn() aynıysa zaten no-op) bu marka için kalıcı hale getirilir — bkz.
+                // LearnedCodeCorrectionStore.cs.
+                codeCorrectionStore.Learn(entry.BrandFullName, entry.GuessedCode, confirmedCode, gonderimFolder);
+
+                File.Delete(file);
+                remainingManifest.RemoveAll(m => string.Equals(m.FileName, entry.FileName, StringComparison.OrdinalIgnoreCase));
+                resolvedCount++;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "KontrolBekliyor: '{File}' damgalanamadı/gönderilemedi, dosya KontrolBekliyor'da bırakıldı.", newName);
+            }
+
+            await Task.Delay(sendDelayMs, ct);
+        }
+
+        if (resolvedCount == 0) return;
+
+        if (remainingManifest.Count == 0)
+        {
+            // Hepsi çözüldü — manifest/özet/klasörün kendisi kaldırılır, sonra klasörün asıl
+            // Gonderim_* ebeveyni (islendi.txt + gonderim_bekleyen.json şartları da sağlanıyorsa)
+            // arşive taşınabilir hâle gelir.
+            try
+            {
+                File.Delete(manifestPath);
+                File.Delete(Path.Combine(kontrolDir, "kontrol_bekliyor.txt"));
+                Directory.Delete(kontrolDir);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "KontrolBekliyor klasörü ('{Dir}') tamamen boşaldı ama silinemedi — işlevsel bir sorun değil.", kontrolDir);
+            }
+            ArchiveIfComplete(gonderimFolder);
+        }
+        else
+        {
+            WriteKontrolBekliyorManifestExact(gonderimFolder, remainingManifest);
         }
     }
 
@@ -1457,6 +1930,75 @@ public class Worker : BackgroundService
     /// yalnız-Excel'li kalmış bir grup klasörünü de ana döngüdeki görselsiz-klasör koruması soru
     /// sormadan kapatır. Dosya taşıma LastWriteTime'ı koruduğu için grup klasörleri 60 sn'lik sessizlik
     /// kuralını beklemeden bir sonraki turda hazırdır.</summary>
+    /// <summary>Yinelenen (duplicate) gönderim güvenlik ağı (2026-08-24, kullanıcı isteği — bkz.
+    /// [[project_duplicate_send_split_blackhole.md]]): WhatsApp bazen aynı Excel'i ve/veya aynı
+    /// görselleri farklı dosya adlarıyla (örn. farklı hash/zaman-damgası önekiyle) İKİ kez teslim
+    /// ediyor. Bu, çoklu-marka bölmesini kilitliyordu — aynı Excel iki kez varsa Excel'deki HER
+    /// kod iki Excel'de birden bulunmuş oluyor, <see cref="SplitMultiBrandFolder"/> hiçbir görseli
+    /// hiçbir gruba atayamıyor (hepsi "birden fazla Excel'de bulundu" ile ATANAMADI'ya düşüyor),
+    /// klasör sessizce GRUPSUZ EXCEL + ATANAMADI raporuyla kapanıyor, müşteriye HİÇBİR ŞEY gitmiyor.
+    /// Aynı kök neden tek-Excel'li klasörlerde de risk: aynı görsel iki kez damgalanıp iki kez
+    /// gönderilebilir.
+    ///
+    /// ExecuteAsync, her hazır klasörü OCR/bölme/damgalamadan ÖNCE burayı çağırır: klasördeki
+    /// gerçek dosyalar (xlsx/xls + desteklenen görseller) SHA256 İÇERİK hash'ine göre gruplanır;
+    /// BİREBİR aynı içerikli 2+ dosya bulunan her grupta adı alfabetik en küçük olan bırakılıp
+    /// diğerleri silinir — kimin "orijinal", kimin "kopya" olduğuna dair güvenilir bir sinyal yok,
+    /// bu yüzden seçim sadece deterministik (hangisi kaldığı önemli değil, ikisi de bayt bayt aynı).
+    /// SADECE bayt-bayt birebir eşleşme silinir: aynı ürünün farklı açılardan iki fotoğrafı ya da
+    /// gerçekten farklı iki Excel (örn. aynı markanın güncellenmiş fiyat listesi) asla bu şekilde
+    /// silinmez — bu yüzden yanlışlıkla veri kaybı riski yok, sadece gerçek bir tekrar teslimatın
+    /// bayt-bir kopyası temizleniyor. Dosya o an kilitliyse (ör. hâlâ yazılıyorsa) sessizce atlanır;
+    /// zararsız, sadece o turda dedup edilmez, sonraki turda tekrar denenir.</summary>
+    private void DeduplicateFolderFiles(string folder)
+    {
+        var candidates = RealXlsxFiles(folder)
+            .Concat(Directory.EnumerateFiles(folder).Where(f => SupportedExtensions.Contains(Path.GetExtension(f))))
+            .ToList();
+        if (candidates.Count < 2)
+            return;
+
+        using var sha256 = System.Security.Cryptography.SHA256.Create();
+        var byHash = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        foreach (var file in candidates)
+        {
+            string hash;
+            try
+            {
+                using var stream = File.OpenRead(file);
+                hash = Convert.ToHexString(sha256.ComputeHash(stream));
+            }
+            catch (IOException)
+            {
+                continue; // dosya o an kilitli/yazılıyor olabilir — savunmacı, bu turda dedup dışı bırakılır
+            }
+            if (!byHash.TryGetValue(hash, out var list))
+                byHash[hash] = list = [];
+            list.Add(file);
+        }
+
+        foreach (var group in byHash.Values.Where(g => g.Count > 1))
+        {
+            var keep = group.OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase).First();
+            foreach (var dup in group.Where(f => f != keep))
+            {
+                try
+                {
+                    File.Delete(dup);
+                    _logger.LogWarning(
+                        "Klasör {Folder}: '{Duplicate}' dosyası '{Keep}' ile BİREBİR aynı içerikte (muhtemelen yinelenen WhatsApp teslimatı) — kopya olarak silindi.",
+                        folder, Path.GetFileName(dup), Path.GetFileName(keep));
+                }
+                catch (IOException ex)
+                {
+                    _logger.LogWarning(ex,
+                        "Klasör {Folder}: '{Duplicate}' dosyası '{Keep}' ile birebir aynı içerikte ama silinemedi (muhtemelen kilitli) — olduğu gibi bırakıldı.",
+                        folder, Path.GetFileName(dup), Path.GetFileName(keep));
+                }
+            }
+        }
+    }
+
     private void SplitMultiBrandFolder(string folder, List<string> excelFiles, OcrEnginePool ocrPool, CancellationToken ct)
     {
         var folderName = Path.GetFileName(folder);
@@ -1605,9 +2147,19 @@ public class Worker : BackgroundService
     // "--- Görseller ---" bölümünden kısaltarak üretmek) büyük klasörlerde (65 görsel) hâlâ
     // WhatsApp'ın pratik metin sınırını (~4096 karakter) zorluyordu — üretimde canlı gözlemlendi
     // (DECO SPORT: bot "OK" döndürdü ama müşteriye hiçbir şey ulaşmadı). Bu tasarım klasör
-    // büyüklüğünden bağımsız olarak sabit/kısa kalır (en fazla `CustomerReportMaxSkippedListed`
+    // büyüklüğünden bağımsız olarak sabit/kısa kalır (en fazla `CustomerReportMaxItemsListed`
     // atlanan satırı listelenir, gerisi sayıyla özetlenir).
-    private const int CustomerReportMaxSkippedListed = 15;
+    //
+    // KONTROLBEKLİYOR (2026-08-28, kullanıcı isteği, gerçek vaka: Gonderim_20260826_160228_1bd6a08b
+    // — kod 26206/güven 44 ile YANLIŞLIKLA damgalanan gorsel_..._6e6383.jpg'nin GERÇEK kodu 24113'tü,
+    // $16,56 ile müşteriye gitti; doğrusu $3,94'tü, aynı partide 10 fuzzy sonuçtan 6'sı yanlış
+    // çıkmıştı): fuzzy (best.IsFuzzy=true — OCR'ın tam string eşleşmesi DEĞİL) hiçbir sonuç artık
+    // müşteriye HİÇ gönderilmiyor; Aşama 3.3 bunları KontrolBekliyor klasörüne yönlendirip
+    // ImageResult'ı "atlandı" (OutputFileName=null) olarak işaretliyor — bu yüzden ayrıca burada
+    // (kod/fiyat tahmini olmadan) "Fiyatlandırılamayanlar" listesinde görünürler; kod/fiyat
+    // detayı SADECE operatörün gördüğü KontrolBekliyor manifestinde tutulur (bkz.
+    // ResolveKontrolBekliyorAsync, LearnedCodeCorrectionStore.cs).
+    private const int CustomerReportMaxItemsListed = 15;
 
     /// <summary>Gonderim klasörünün müşteri tarafından GERÇEKTEN oluşturulduğu (gönderildiği) anı
     /// döner — klasör adındaki Gonderim_yyyyMMdd_HHmmss_... zaman damgasından ayrıştırılır. Bu,
@@ -1642,17 +2194,27 @@ public class Worker : BackgroundService
         sb.AppendLine($"Klasör: {Path.GetFileName(folder)}");
         sb.AppendLine($"Gönderim tarihi: {GetFolderCreatedAt(folder):yyyy-MM-dd HH:mm:ss}");
         sb.AppendLine($"Marka: {brand.FullName}  |  Kur: 1 USD = {rateValue} TRY  |  Süre: {duration.TotalSeconds:N0} sn");
+        sb.AppendLine($"Hesaplama formülü: Ürün fiyatı × {brand.NetCarpan} (sabit çarpan) ÷ {rateValue} (sabit kur) = Etiket fiyatı (USD)");
         sb.AppendLine();
         sb.AppendLine($"Toplam görsel: {totalImages}  |  Fiyatlandırılan: {matchedCount}  |  Atlanan/Hatalı: {skipped.Count}  |  Gönderilen: {sentOk}/{sendResults.Count}");
 
+        // 2026-08-28 (kullanıcı isteği, gerçek vaka: Gonderim_20260826_160228_1bd6a08b — kod
+        // 26206/güven 44 ile YANLIŞLIKLA damgalanan bir görsel $16,56 ile müşteriye gitmişti,
+        // doğrusu 24113/$3,94'tü): eşleşmesi kesin olmayan (fuzzy — OCR'ın tam string eşleşmesi
+        // DEĞİL) hiçbir görsel artık müşteriye HİÇ gönderilmiyor; bunlar "KontrolBekliyor"
+        // klasörüne düşüp burada da (SkipOrErrorReason üzerinden, kod/fiyat AÇIKLANMADAN —
+        // sadece operatör görüyor) "Fiyatlandırılamayanlar" ile aynı listede görünür. Müşteriye
+        // ayrı bir "kod X, $Y doğru mu" listesi BİLEREK verilmiyor — tahmin edilen (ve yanlış
+        // çıkma ihtimali kanıtlanmış) bir fiyatı müşteriye göstermek, göndermemekle aynı riski
+        // taşır.
         if (skipped.Count > 0)
         {
             sb.AppendLine();
             sb.AppendLine("Fiyatlandırılamayanlar:");
-            foreach (var r in skipped.Take(CustomerReportMaxSkippedListed))
+            foreach (var r in skipped.Take(CustomerReportMaxItemsListed))
                 sb.AppendLine($"- {r.FileName}: {r.SkipOrErrorReason}");
-            if (skipped.Count > CustomerReportMaxSkippedListed)
-                sb.AppendLine($"... ve {skipped.Count - CustomerReportMaxSkippedListed} tane daha (tam döküm için islendi.txt'ye bakınız)");
+            if (skipped.Count > CustomerReportMaxItemsListed)
+                sb.AppendLine($"... ve {skipped.Count - CustomerReportMaxItemsListed} tane daha (tam döküm için islendi.txt'ye bakınız)");
         }
 
         return sb.ToString();

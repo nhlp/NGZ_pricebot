@@ -13,6 +13,9 @@
   <ItemGroup>
     <PackageReference Include="ExcelDataReader" Version="3.9.0" />
     <PackageReference Include="ExcelDataReader.DataSet" Version="3.9.0" />
+    <!-- LearnedCodeCorrectionStore.cs'in ILogger bağımlılığı için (2026-08-28) — sadece
+         soyutlama paketi, NullLogger.Instance testlerde gerçek bir sink gerektirmeden kullanılır. -->
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.2" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
     <PackageReference Include="NPOI" Version="2.8.0" />
     <PackageReference Include="System.Text.Encoding.CodePages" Version="10.0.10" />
@@ -46,6 +49,9 @@
     <!-- IOcrEngine.cs: CodeMatch/ScanResult record'ları — PaddleScanOcrMatching.cs bunlara
          bağımlı, native paket gerektirmiyor. -->
     <Compile Include="..\IOcrEngine.cs" />
+    <!-- LearnedCodeCorrectionStore.cs (2026-08-28): LearnedBrandAliasStore.cs ile AYNI gerekçeyle
+         saf/native bağımlılığı yok — sadece System.Text.Json + dosya G/Ç. -->
+    <Compile Include="..\LearnedCodeCorrectionStore.cs" />
   </ItemGroup>
 
 </Project>
