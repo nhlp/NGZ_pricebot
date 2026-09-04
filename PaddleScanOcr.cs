@@ -178,7 +178,28 @@ public sealed partial class PaddleScanOcr : IOcrEngine
 
     private Dictionary<string, float> Scan(string imagePath)
     {
-        using var src = Cv2.ImDecode(File.ReadAllBytes(imagePath), ImreadModes.Color);
+        byte[]? imageBytes = null;
+        try
+        {
+            imageBytes = File.ReadAllBytes(imagePath);
+        }
+        catch
+        {
+            // Dosya okunurken hata (kilitli, silinmiş, vb.) — boş sonuç döndür,
+            // sarmalayıcı çağrıda uyarı logu yazılır
+            return new Dictionary<string, float>();
+        }
+
+        // Dosya boş ise — geçersiz görsel
+        if (imageBytes == null || imageBytes.Length == 0)
+            return new Dictionary<string, float>();
+
+        using var src = Cv2.ImDecode(imageBytes, ImreadModes.Color);
+
+        // ImDecode başarısız oldu (dosya bozuk, format desteklenmiyor, vb.) — Mat boş döner
+        if (src.Empty())
+            return new Dictionary<string, float>();
+
         // QueuedPaddleOcrAll.Run zaten kendi adanmış thread'ine kuyruklayıp orada çalıştırıyor;
         // burada senkron olarak beklemek (bu metodun IOcrEngine sözleşmesi gereği senkron olması
         // dışında) ek bir paralellik kaybı yaratmıyor -- OcrEnginePool zaten çağıranı (Worker.cs'in

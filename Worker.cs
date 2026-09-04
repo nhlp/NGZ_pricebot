@@ -458,10 +458,28 @@ public class Worker : BackgroundService
                     Parallel.For(0, allFiles.Count, parallelOptions, i =>
                     {
                         var imageTimer = Stopwatch.StartNew();
-                        scanResults[i] = ocrPool.Run(o => o.FindProductCodes(allFiles[i], excelCodesUnion, descriptionsUnion));
-                        _logger.LogInformation("OCR: {File} -> {Matches} eşleşme, {Candidates} aday ({Elapsed:N1} sn)",
-                            Path.GetFileName(allFiles[i]), scanResults[i].Matches.Count, scanResults[i].Candidates.Count,
-                            imageTimer.Elapsed.TotalSeconds);
+                        try
+                        {
+                            scanResults[i] = ocrPool.Run(o => o.FindProductCodes(allFiles[i], excelCodesUnion, descriptionsUnion));
+
+                            // Geçersiz görsel kontrolü: 0 aday çıktı (dosya bozuk/okunamaz/boş)
+                            if (scanResults[i].Candidates.Count == 0 && scanResults[i].Matches.Count == 0)
+                            {
+                                _logger.LogWarning("OCR: {File} -> GEÇERSIZ/BOZUK GÖRSEL (aday yok, dosya okunmuyor)",
+                                    Path.GetFileName(allFiles[i]));
+                            }
+                            else
+                            {
+                                _logger.LogInformation("OCR: {File} -> {Matches} eşleşme, {Candidates} aday ({Elapsed:N1} sn)",
+                                    Path.GetFileName(allFiles[i]), scanResults[i].Matches.Count, scanResults[i].Candidates.Count,
+                                    imageTimer.Elapsed.TotalSeconds);
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogError(ex, "OCR: {File} -> İŞLEME HATASI", Path.GetFileName(allFiles[i]));
+                            scanResults[i] = new ScanResult(new List<CodeMatch>(), new List<string>(), new Dictionary<string, float>());
+                        }
                     });
                     var scans = allFiles.Select((file, i) => (File: file, Scan: scanResults[i])).ToList();
 
